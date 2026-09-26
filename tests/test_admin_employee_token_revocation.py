@@ -359,6 +359,32 @@ class EmployeeTokenRevocationTests(unittest.TestCase):
         ).first()
         self.assertIsNotNone(row)
 
+    def test_employee_detail_offers_purge_undo_while_tombstone_active(self):
+        from app.routers.team_admin_employees import (
+            admin_employee_detail,
+            restore_employee_purge_tombstone,
+        )
+
+        def _detail_html():
+            response = admin_employee_detail(
+                self._request(),
+                self.employee.id,
+                session=self.session,
+            )
+            self.assertEqual(response.status_code, 200)
+            return response.body.decode("utf-8")
+
+        self.assertNotIn("/purge/undo", _detail_html())
+        self.assertEqual(self._purge().status_code, 303)
+        self.session.expire_all()
+        html = _detail_html()
+        self.assertIn(f'action="/team/admin/employees/{self.employee.id}/purge/undo"', html)
+        self.assertIn("Undo purge", html)
+
+        restore_employee_purge_tombstone(self.session, self.employee.id)
+        self.session.expire_all()
+        self.assertNotIn("/purge/undo", _detail_html())
+
     def test_expired_purge_tombstone_scrub_preserves_recoverable_window(self):
         from app.models import EmployeePurgeTombstone, utcnow
         from app.routers.team_admin_employees import scrub_expired_purge_tombstones

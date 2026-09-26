@@ -1,212 +1,204 @@
 {% extends "team/base.html" %}
-{% block header_sub %}
-<div class="pt-h1-sub">
-  {% set hour = now_hour if now_hour is defined else 12 %}
-  {% if hour < 12 %}Good morning{% elif hour < 17 %}Good afternoon{% else %}Good evening{% endif %},
-  {{ current_user.display_name or current_user.username }}.
+{#- Employee Home (redesign Phase 1). View-model comes from
+    `_employee_home_context()` in app/routers/team.py and the pure builders
+    in app/team/home.py. Every value has a default so the template still
+    renders when a test passes only the nav context. -#}
+{% from "team/_icons.html" import icon %}
+{% set h = home|default({}) %}
+{% set hero = h.hero|default({'state': 'off', 'status': "You're off today", 'big': 'No shifts posted', 'meta': [{'label': 'No upcoming shifts posted yet.', 'value': ''}], 'actions': [], 'live': false, 'progress': none}) %}
+{% set tiles = h.tiles|default({}) %}
+{% set display_name = current_user.display_name or current_user.username %}
+
+{% block page_header %}
+<div class="pt-topline">
+  <div>
+    {% if h.eyebrow %}<div class="pt-eyebrow">{{ h.eyebrow }}</div>{% endif %}
+    <h1 class="pt-title">Hi, {{ h.first_name|default((display_name or 'there').split()[0] if display_name else 'there') }}</h1>
+  </div>
+  <a class="pt-avatar" href="/team/more" aria-label="More: profile, help and sign out">{{ h.initials|default((display_name or '?')[:1]) }}</a>
 </div>
 {% endblock %}
+
 {% block content %}
+<div class="pt-home">
+<div class="pt-home-cols">
+<div class="pt-home-col">
 
-{% set today_shift_rows = today_shifts|default([]) %}
-{% set upcoming_rows = upcoming_shifts|default([]) %}
-{% set pay = dashboard_pay|default({}) %}
-{% set announcements_preview = active_announcements|default([]) %}
-{% set focus = today_focus|default({'items': [], 'todo_count': 0}) %}
-{% set completion = profile_completion|default({'items': [], 'complete_count': 0, 'total_count': 0, 'percent': 0}) %}
-
-<section class="pt-shift-hero">
-  <div>
-    <div class="pt-widget-label">Today's shift</div>
-    {% if today_shift_rows %}
-      {% for shift in today_shift_rows %}
-        <div class="pt-shift-title">{{ shift.label or 'Shift' }}</div>
-        <div class="pt-shift-sub">
-          {{ shift.calendar_label|default('Schedule') }} -
-          {{ shift.kind|replace('_', ' ')|title }}{% if shift.day_note %} · {{ shift.day_note }}{% endif %}
-        </div>
-      {% endfor %}
-    {% else %}
-      <div class="pt-shift-title">No shift today</div>
-      <div class="pt-shift-sub">Check upcoming shifts below or open the full schedule.</div>
-    {% endif %}
-  </div>
-  <div class="pt-shift-day-stats" aria-label="Today's timecard status">
-    <div>
-      <div class="pt-widget-label">Clocked in today</div>
-      <div class="pt-mini-stat">{{ pay.clocked_in_today_label|default('Not clocked in') }}</div>
+  <section class="pt-hero {{ hero.state }}" aria-label="Today">
+    <div class="pt-hero-status">
+      {% if hero.live %}<span class="pt-hero-live" aria-hidden="true"></span>{% endif %}
+      {{ hero.status }}
     </div>
-    <div>
-      <div class="pt-widget-label">Hours today</div>
-      <div class="pt-mini-stat">{{ pay.hours_today_label|default('0m') }}</div>
-    </div>
-    <div>
-      <div class="pt-widget-label">Break</div>
-      <div class="pt-mini-stat">{{ pay.break_today_label|default('Not yet') }}</div>
-    </div>
-  </div>
-</section>
-
-<section class="pt-today-focus">
-  <div class="pt-card pt-focus-card">
-    <div class="pt-panel-head">
-      <div>
-        <div class="pt-card-title">What do I need to do today?</div>
-        <div class="pt-card-sub">
-          {% if focus.todo_count %}{{ focus.todo_count }} item{{ 's' if focus.todo_count != 1 else '' }} to check.{% else %}You are caught up right now.{% endif %}
-        </div>
+    <div class="pt-hero-big">{{ hero.big }}</div>
+    {% if hero.meta %}
+      <div class="pt-hero-meta">
+        {%- for part in hero.meta -%}
+          {%- if not loop.first %} · {% endif -%}
+          {%- if part.label %}{{ part.label }}{% if part.value %} {% endif %}{% endif -%}
+          {%- if part.value %}<b>{{ part.value }}</b>{% endif -%}
+        {%- endfor -%}
       </div>
-      <a class="pt-link-inline" href="/team/notifications">Notifications</a>
-    </div>
-    <div class="pt-focus-list">
-      {% for item in focus["items"] %}
-        <a class="pt-focus-row is-{{ item.state }}" href="{{ item.href }}">
-          <span class="pt-focus-dot"></span>
-          <span>
-            <strong>{{ item.label }}</strong>
-            <span>{{ item.value }}</span>
+    {% endif %}
+    {% if hero.progress is not none and hero.progress is defined %}
+      <progress class="pt-progress" max="100" value="{{ hero.progress }}" aria-label="Shift progress">{{ hero.progress }}%</progress>
+    {% endif %}
+    {% if hero.actions %}
+      <div class="pt-hero-actions">
+        {% for action in hero.actions %}
+          <a class="pt-btn{% if action.kind %} {{ action.kind }}{% endif %}" href="{{ action.href }}">{{ action.label }}</a>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </section>
+
+  {% if tiles %}
+  <div class="pt-tiles">
+    {% set tile_tag = 'a' if tiles.href else 'div' %}
+    <{{ tile_tag }} class="pt-tile"{% if tiles.href %} href="{{ tiles.href }}"{% endif %}>
+      <div class="pt-tile-k">Last week</div>
+      <div class="pt-tile-v">{{ tiles.last_week_value }}{% if tiles.last_week_value != '–' %}<small>h</small>{% endif %}</div>
+      <div class="pt-tile-s">{% if tiles.linked %}{{ tiles.last_week_sub }}{% else %}Hours not connected{% endif %}</div>
+    </{{ tile_tag }}>
+    <{{ tile_tag }} class="pt-tile"{% if tiles.href %} href="{{ tiles.href }}"{% endif %}>
+      <div class="pt-tile-k">This week</div>
+      <div class="pt-tile-v">{{ tiles.week_value }}{% if tiles.week_scheduled %}<small> / {{ tiles.week_scheduled }}h</small>{% elif tiles.week_value != '–' %}<small>h</small>{% endif %}</div>
+      <div class="pt-tile-s">{% if tiles.week_scheduled %}worked / scheduled{% elif tiles.linked %}worked so far{% else %}Clockify not linked{% endif %}</div>
+    </{{ tile_tag }}>
+  </div>
+  {% endif %}
+
+  <section class="pt-section" aria-labelledby="pt-needs-you-h">
+    <div class="pt-section-h"><h2 id="pt-needs-you-h">Needs you</h2></div>
+    <div class="pt-rows">
+      {% for item in h.needs_you|default([]) %}
+        <a class="pt-row pt-todo-row" href="{{ item.href }}">
+          <span class="pt-ico is-{{ item.tone }}">{{ icon(item.icon) }}</span>
+          <span class="pt-row-body">
+            <span class="pt-row-title">{{ item.label }}</span>
+            {% if item.sub %}<span class="pt-row-sub">{{ item.sub }}</span>{% endif %}
           </span>
+          <span class="pt-chev">{{ icon('chev') }}</span>
         </a>
+      {% else %}
+        <div class="pt-empty">Nothing needs you right now.</div>
       {% endfor %}
     </div>
-  </div>
-  <div class="pt-card pt-profile-card">
-    <div class="pt-panel-head">
-      <div>
-        <div class="pt-card-title">Profile checklist</div>
-        <div class="pt-card-sub">{{ completion.complete_count }}/{{ completion.total_count }} complete</div>
-      </div>
-      <a class="pt-link-inline" href="/team/profile">Update</a>
-    </div>
-    <div class="pt-check-meter" aria-hidden="true"><span style="width: {{ completion.percent }}%;"></span></div>
-    <div class="pt-check-list compact">
-      {% for item in completion["items"] %}
-        <a class="pt-check-row {% if item.done %}done{% endif %}" href="{{ item.href }}">
-          <span class="pt-check-icon">{% if item.done %}OK{% else %}Fix{% endif %}</span>
-          <span>{{ item.label }}</span>
+  </section>
+
+  {% if current_user and current_user.role in ("admin", "manager") and (show_supply_queue_count|default(false) or show_timeoff_queue_count|default(false)) %}
+  <section class="pt-section" aria-labelledby="pt-queues-h">
+    <div class="pt-section-h"><h2 id="pt-queues-h">Team queues</h2><a href="/team/admin">Team admin</a></div>
+    <div class="pt-rows">
+      {% if show_supply_queue_count|default(false) %}
+        <a class="pt-row" href="/team/admin/supply">
+          <span class="pt-ico is-purple">{{ icon('box') }}</span>
+          <span class="pt-row-body">
+            <span class="pt-row-title">Supply queue</span>
+            <span class="pt-row-sub">Pending requests</span>
+          </span>
+          <span class="pt-count">{{ supply_queue_count }}</span>
         </a>
-      {% endfor %}
+      {% endif %}
+      {% if show_timeoff_queue_count|default(false) %}
+        <a class="pt-row" href="/team/admin/timeoff?status=submitted">
+          <span class="pt-ico is-info">{{ icon('beach') }}</span>
+          <span class="pt-row-body">
+            <span class="pt-row-title">Time-off queue</span>
+            <span class="pt-row-sub">Pending requests</span>
+          </span>
+          <span class="pt-count">{{ timeoff_queue_count }}</span>
+        </a>
+      {% endif %}
     </div>
-  </div>
-</section>
-
-<section class="pt-dashboard-stat-grid">
-  <a class="pt-widget" href="/team/hours" style="display:block;">
-    <div class="pt-widget-label">Hours this week</div>
-    <div class="pt-widget-value">{{ pay.hours_label|default('0m') }}</div>
-    <div class="pt-widget-sub">{{ pay.hours_this_week_sub|default('Since Monday 12:00 AM') }}</div>
-  </a>
-
-  <a class="pt-widget" href="{{ schedule_href|default('/team/schedule') }}" style="display:block;">
-    <div class="pt-widget-label">Next shift</div>
-    {% if next_shift %}
-      <div class="pt-widget-value">{{ next_shift.shift_date.strftime('%a') }}</div>
-      <div class="pt-widget-sub">{{ next_shift.shift_date.strftime('%b %d') }} · {{ next_shift.label or 'Shift' }}</div>
-    {% else %}
-      <div class="pt-widget-value">None</div>
-      <div class="pt-widget-sub">No upcoming shifts posted.</div>
-    {% endif %}
-  </a>
-
-  <a class="pt-widget" href="/team/hours" style="display:block;">
-    <div class="pt-widget-label">Estimated pay</div>
-    <div class="pt-widget-value">{{ pay.estimated_pay_label|default('$0.00') }}</div>
-    <div class="pt-widget-sub">{{ pay.pay_basis|default('Clockify hours plus pay rate') }}</div>
-  </a>
-
-  {% if show_supply_queue_count|default(false) %}
-  <a class="pt-widget" href="/team/admin/supply" style="display:block;">
-    <div class="pt-widget-label">Supply queue</div>
-    <div class="pt-widget-value">{{ supply_queue_count }}</div>
-    <div class="pt-widget-sub">Pending requests</div>
-  </a>
+  </section>
   {% endif %}
 
-  {% if show_timeoff_queue_count|default(false) %}
-  <a class="pt-widget" href="/team/admin/timeoff?status=submitted" style="display:block;">
-    <div class="pt-widget-label">Time-off queue</div>
-    <div class="pt-widget-value">{{ timeoff_queue_count }}</div>
-    <div class="pt-widget-sub">Pending requests</div>
-  </a>
-  {% endif %}
-</section>
+</div>
+<div class="pt-home-col">
 
-<section class="pt-dashboard-lower">
-  <div class="pt-card pt-dashboard-panel">
-    <div class="pt-panel-head">
-      <div>
-        <div class="pt-card-title">Announcements</div>
-        <div class="pt-card-sub">Latest from the team.</div>
-      </div>
-      <a class="pt-link-inline" href="/team/announcements">See all</a>
-    </div>
-    {% if announcements_preview %}
-      <div class="pt-list-stack">
-        {% for ann in announcements_preview[:3] %}
-          <a class="pt-list-row" href="/team/announcements">
-            <div>
-              <div class="pt-list-title">{{ ann.title }}</div>
-              <div class="pt-list-sub">{{ ann.body[:150] }}{% if ann.body|length > 150 %}...{% endif %}</div>
-            </div>
-            {% if ann.pinned %}<span class="pt-chip">Pinned</span>{% endif %}
-          </a>
-        {% endfor %}
-      </div>
-    {% else %}
-      <div class="pt-empty-panel">Nothing new right now.</div>
-    {% endif %}
-  </div>
-
-  <div class="pt-card pt-dashboard-panel">
-    <div class="pt-panel-head">
-      <div>
-        <div class="pt-card-title">Upcoming</div>
-        <div class="pt-card-sub">Your next five shifts.</div>
-      </div>
-      <a class="pt-link-inline" href="{{ schedule_href|default('/team/schedule') }}">Open schedule</a>
-    </div>
-    {% if upcoming_rows %}
-      <div class="pt-list-stack">
-        {% for shift in upcoming_rows %}
-          <a class="pt-list-row pt-shift-row" href="{{ schedule_href|default('/team/schedule') }}">
-            <div class="pt-date-block">
-              <strong>{{ shift.shift_date.strftime('%a') }}</strong>
-              <span>{{ shift.shift_date.strftime('%b %d') }}</span>
-            </div>
-            <div>
-              <div class="pt-list-title">{{ shift.label or 'Shift' }}</div>
-              <div class="pt-list-sub">
-                {{ shift.calendar_label|default('Schedule') }} -
-                {{ shift.kind|replace('_', ' ')|title }}{% if shift.day_note %} · {{ shift.day_note }}{% endif %}
-              </div>
-            </div>
-            <span class="pt-chip">Mine</span>
-          </a>
-        {% endfor %}
-      </div>
-    {% else %}
-      <div class="pt-empty-panel">No upcoming shifts posted.</div>
-    {% endif %}
-  </div>
-</section>
-
-{% if current_user and current_user.role in ("admin", "manager", "reviewer") %}
-  {% set staffing = today_staffing|default([]) %}
-  <div class="pt-card" style="margin-top:20px;">
-    <div class="pt-card-title">Who's on today</div>
-    {% if staffing %}
-      <div style="display:grid; gap:10px; margin-top:12px;">
-        {% for row in staffing %}
-          <div class="pt-today-staff-row" style="display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:10px 0; border-top:{% if not loop.first %}1px solid var(--pt-border){% else %}0{% endif %};">
-            <div style="font-weight:700;">{{ row.display_name }}</div>
-            <div style="font-size:13px; color:var(--pt-muted); text-align:right;">{{ row.shifts|join(', ') }}</div>
+  {% if h.week %}
+  <section class="pt-section" aria-labelledby="pt-week-h">
+    <div class="pt-section-h"><h2 id="pt-week-h">This week</h2><a href="{{ h.schedule_href|default(schedule_href|default('/team/schedule')) }}">Schedule</a></div>
+    <ol class="pt-week">
+      {% for day in h.week %}
+        <li class="pt-day{% if day.is_today %} is-today{% endif %}{% if day.is_past %} is-past{% endif %}" aria-label="{{ day.aria }}" title="{{ day.aria }}">
+          <div class="pt-day-n" aria-hidden="true">{{ day.letter }}</div>
+          <div class="pt-day-d" aria-hidden="true">{{ day.number }}</div>
+          <div class="pt-day-mk" aria-hidden="true">
+            {% if day.has_shift %}<i class="pt-day-dot is-shift"></i>{% endif %}
+            {% if day.has_timeoff %}<i class="pt-day-dot is-timeoff"></i>{% endif %}
           </div>
+        </li>
+      {% endfor %}
+    </ol>
+    <div class="pt-legend" aria-hidden="true">
+      <span><i class="pt-day-dot is-shift"></i>Scheduled</span>
+      <span><i class="pt-day-dot is-timeoff"></i>Time off</span>
+    </div>
+  </section>
+  {% endif %}
+
+  {% if h.can_requests %}
+  <section class="pt-section" aria-labelledby="pt-requests-h">
+    <div class="pt-section-h"><h2 id="pt-requests-h">My requests</h2><a href="/team/requests">All</a></div>
+    <div class="pt-rows">
+      {% for row in h.requests %}
+        <a class="pt-row pt-request-row" href="{{ row.href }}">
+          <span class="pt-ico is-{{ row.tone }}">{{ icon(row.icon) }}</span>
+          <span class="pt-row-body">
+            <span class="pt-row-title">{{ row.title }}</span>
+            <span class="pt-row-sub">{{ row.sub }}</span>
+          </span>
+          <span class="pt-pill {{ row.pill_tone }}">{{ row.pill }}</span>
+        </a>
+      {% else %}
+        <div class="pt-empty">No time-off or supply requests yet.</div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% if h.latest %}
+  <section class="pt-section" aria-labelledby="pt-latest-h">
+    <div class="pt-section-h"><h2 id="pt-latest-h">Latest</h2><a href="/team/inbox">Inbox</a></div>
+    <div class="pt-rows">
+      {#- Opening marks it read (POST + CSRF), then lands on the announcement. -#}
+      <form method="post" action="/team/inbox/open">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="kind" value="announcement">
+        <input type="hidden" name="key" value="{{ h.latest.id }}">
+        <button type="submit" class="pt-row pt-latest-row{% if h.latest_unread %} is-unread{% endif %}">
+          {% if h.latest_unread %}<span class="pt-dot-unread" aria-label="Unread"></span>{% endif %}
+          <span class="pt-ico is-accent">{{ icon('megaphone') }}</span>
+          <span class="pt-row-body">
+            <span class="pt-row-title">{{ h.latest.title }}</span>
+            <span class="pt-row-sub">{% if h.latest.pinned %}Pinned · {% endif %}Posted {{ h.latest_posted }}</span>
+          </span>
+          <span class="pt-chev">{{ icon('chev') }}</span>
+        </button>
+      </form>
+    </div>
+  </section>
+  {% endif %}
+
+  {% if current_user and current_user.role in ("admin", "manager", "reviewer") %}
+    {% set staffing = today_staffing|default([]) %}
+    <section class="pt-section" aria-labelledby="pt-staffing-h">
+      <div class="pt-section-h"><h2 id="pt-staffing-h">Who's on today</h2></div>
+      <div class="pt-rows">
+        {% for row in staffing %}
+          <div class="pt-row pt-today-staff-row">
+            <span class="pt-row-body"><span class="pt-row-title">{{ row.display_name }}</span></span>
+            <span class="pt-row-aside">{{ row.shifts|join(', ') }}</span>
+          </div>
+        {% else %}
+          <div class="pt-empty">Nobody scheduled today</div>
         {% endfor %}
       </div>
-    {% else %}
-      <div class="pt-card-sub" style="margin-top:8px;">Nobody scheduled today</div>
-    {% endif %}
-  </div>
-{% endif %}
+    </section>
+  {% endif %}
 
+</div>
+</div>
+</div>
 {% endblock %}

@@ -31,12 +31,19 @@ from ..models import (
     utcnow,
 )
 from ..shared import templates
+from ..team.clockify import portal_timezone
+from ..team.requests_view import submitted_days
 from ..team.team_notifications import notify_employee
 from .team_admin import _permission_gate
 
 router = APIRouter()
 
-VALID_STATUSES = ("submitted", "approved", "denied")
+VALID_STATUSES = ("submitted", "approved", "denied", "cancelled")
+# Employees can cancel a pending request (Phase 3). Those rows stay for the
+# audit trail but are hidden from the default queue; ?status=cancelled
+# still lists them.
+HIDDEN_BY_DEFAULT = ("cancelled",)
+CANCELLED_MESSAGE = "The employee cancelled that request, so there's nothing to decide."
 
 
 def _monday_of(d: date) -> date:
@@ -89,6 +96,8 @@ def admin_timeoff_list(
     stmt = select(TimeOffRequest).order_by(TimeOffRequest.created_at.asc())
     if filter_status:
         stmt = stmt.where(TimeOffRequest.status == filter_status)
+    else:
+        stmt = stmt.where(TimeOffRequest.status.not_in(HIDDEN_BY_DEFAULT))
     rows = list(session.exec(stmt).all())
     if filter_status is None:
         rows.sort(
@@ -126,6 +135,7 @@ def admin_timeoff_list(
             "active": "time-off",
             "current_user": current,
             "requests": rows,
+            "submitted_on": submitted_days(rows, portal_timezone()),
             "submitters": submitters,
             "filter_status": filter_status,
             "statuses": VALID_STATUSES,
@@ -252,6 +262,8 @@ def _transition_timeoff(
                 session.commit()
         return None
 
+    if row.status == "cancelled":
+        return HTMLResponse(CANCELLED_MESSAGE, status_code=409)
     if row.status != "submitted":
         return HTMLResponse(
             "Time-off request has already been decided.",
@@ -316,11 +328,19 @@ def _transition_timeoff(
             f"{row.start_date.strftime('%b %d')} - {row.end_date.strftime('%b %d')}"
             + (f": {clean_notes}" if clean_notes else "")
         ),
-        link_path="/team/timeoff",
+        link_path="/team/requests?tab=timeoff",
         request=request,
     )
     session.commit()
     return None
+
+
+def _conflict_message(session: Session, request_id: int) -> str:
+    session.expire_all()
+    row = session.get(TimeOffRequest, request_id)
+    if row is not None and row.status == "cancelled":
+        return CANCELLED_MESSAGE
+    return "Time-off request has already been decided."
 
 
 @router.post("/team/admin/timeoff/{request_id}/approve")
@@ -347,7 +367,7 @@ async def admin_timeoff_approve(
     )
     if err:
         if err.status_code == 409:
-            return _queue_redirect("Time-off request has already been decided.", error=True)
+            return _queue_redirect(_conflict_message(session, request_id), error=True)
         return err
     return _queue_redirect("Approved.")
 
@@ -376,6 +396,6 @@ async def admin_timeoff_deny(
     )
     if err:
         if err.status_code == 409:
-            return _queue_redirect("Time-off request has already been decided.", error=True)
+            return _queue_redirect(_conflict_message(session, request_id), error=True)
         return err
     return _queue_redirect("Denied.")

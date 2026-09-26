@@ -1,0 +1,158 @@
+{% extends "team/base.html" %}
+{#- Phone "More" tab (redesign Phase 1). Every link is filtered through the
+    same permission-checked `nav_items` / `tools_nav_items` / admin items as
+    the sidebar, so it never lists a page this user would get a 403 on. -#}
+{% from "team/_icons.html" import icon %}
+{% set _nav = nav_items|default([]) %}
+{% set _names = _nav|map(attribute='name')|list %}
+{% set display_name = current_user.display_name or current_user.username %}
+{% set completion = profile_completion %}
+{% set nav_icons = {
+    'inbox': 'inbox', 'policies': 'shield', 'time-off': 'beach', 'supply': 'box',
+    'inventory': 'grid', 'add-stock': 'plus', 'buylist': 'tag',
+    'live-stream': 'live', 'live-hits': 'spark', 'degen-eye': 'eye'
+} %}
+{% set _inbox_unread = inbox_unread|default(0) %}
+{% set _inbox_kinds = inbox_kinds|default([]) %}
+
+{% block page_header %}
+<div class="pt-topline"><h1 class="pt-title">More</h1></div>
+{% endblock %}
+
+{% block content %}
+<div class="pt-page-narrow">
+
+  <div class="pt-kit-card">
+    {% set me_tag = 'a' if 'profile' in _names else 'div' %}
+    <{{ me_tag }} class="pt-me-card"{% if 'profile' in _names %} href="/team/profile"{% endif %}>
+      <span class="pt-avatar" aria-hidden="true">{{ ((display_name or '?').split()|map('first')|join(''))[:2]|upper }}</span>
+      <span class="pt-row-body">
+        <span class="pt-me-name">{{ display_name }}</span>
+        <span class="pt-me-sub">{{ current_user.role|capitalize }} · @{{ current_user.username }}</span>
+      </span>
+      {% if 'profile' in _names %}<span class="pt-chev">{{ icon('chev') }}</span>{% endif %}
+    </{{ me_tag }}>
+    {% if completion and completion.total_count %}
+      <div class="pt-me-meter">
+        <progress class="pt-progress is-accent" max="{{ completion.total_count }}" value="{{ completion.complete_count }}" aria-label="Profile checklist">{{ completion.complete_count }}/{{ completion.total_count }}</progress>
+        Profile {{ completion.complete_count }}/{{ completion.total_count }}
+      </div>
+    {% endif %}
+  </div>
+
+  {% set reading = _nav|selectattr('name', 'in', ['inbox', 'policies'])|list %}
+  {% if reading %}
+    <div class="pt-group-h">Stay in the loop</div>
+    <div class="pt-rows">
+      {% for item in reading %}
+        <a class="pt-row" href="{{ item.href }}">
+          <span class="pt-ico{% if item.name == 'policies' and unsigned_policy_count %} is-warn{% endif %}">{{ icon(nav_icons.get(item.name, 'dot')) }}</span>
+          <span class="pt-row-body">
+            <span class="pt-row-title">{{ item.label }}</span>
+            {% if item.name == 'policies' %}
+              <span class="pt-row-sub">{% if unsigned_policy_count %}{{ unsigned_policy_count }} need{{ 's' if unsigned_policy_count == 1 else '' }} your OK{% else %}All signed{% endif %}</span>
+            {% elif item.name == 'inbox' %}
+              <span class="pt-row-sub">{% if 'announcement' in _inbox_kinds and 'document' in _inbox_kinds %}Announcements, updates &amp; documents{% elif 'announcement' in _inbox_kinds %}Announcements &amp; updates{% else %}Documents{% endif %}</span>
+            {% endif %}
+          </span>
+          {% if item.name == 'policies' and unsigned_policy_count %}
+            <span class="pt-count is-warn">{{ unsigned_policy_count }}</span>
+          {% elif item.name == 'inbox' and _inbox_unread %}
+            <span class="pt-count" aria-label="{{ _inbox_unread }} unread">{{ _inbox_unread }}</span>
+          {% else %}
+            <span class="pt-chev">{{ icon('chev') }}</span>
+          {% endif %}
+        </a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% set can_photo_listing = current_user and current_user.role in ('admin', 'manager') %}
+  {% if tools_nav_items or can_photo_listing %}
+    <div class="pt-group-h">Ops tools</div>
+    <div class="pt-rows">
+      {% for item in tools_nav_items|default([]) %}
+        <a class="pt-row" href="{{ item.href }}">
+          <span class="pt-ico">{{ icon(nav_icons.get(item.name, 'dot')) }}</span>
+          <span class="pt-row-body"><span class="pt-row-title">{{ item.label }}</span></span>
+          <span class="pt-chev">{{ icon('chev') }}</span>
+        </a>
+      {% endfor %}
+      {% if can_photo_listing %}
+        <a class="pt-row" href="/tiktok/products/assistant">
+          <span class="pt-ico">{{ icon('camera') }}</span>
+          <span class="pt-row-body"><span class="pt-row-title">Photo to listing</span></span>
+          <span class="pt-chev">{{ icon('chev') }}</span>
+        </a>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if admin_nav_items and current_user and current_user.role in ("admin", "manager", "reviewer") %}
+    <div class="pt-group-h">Team admin</div>
+    <div class="pt-rows">
+      {% for item in admin_nav_items %}
+        <a class="pt-row" href="{{ item.href }}">
+          <span class="pt-row-body"><span class="pt-row-title">{{ item.label }}</span></span>
+          <span class="pt-chev">{{ icon('chev') }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <div class="pt-group-h">Help &amp; settings</div>
+  <div class="pt-rows">
+    <a class="pt-row" href="/team/help">
+      <span class="pt-ico">{{ icon('help') }}</span>
+      <span class="pt-row-body">
+        <span class="pt-row-title">Get help</span>
+        <span class="pt-row-sub">Message a manager</span>
+      </span>
+      <span class="pt-chev">{{ icon('chev') }}</span>
+    </a>
+    <a class="pt-row" href="/team/help/tutorial">
+      <span class="pt-ico">{{ icon('book') }}</span>
+      <span class="pt-row-body">
+        <span class="pt-row-title">Portal tour</span>
+        <span class="pt-row-sub">Step-by-step walkthrough</span>
+      </span>
+      <span class="pt-chev">{{ icon('chev') }}</span>
+    </a>
+    {% if 'inbox' in _names and 'notification' in _inbox_kinds %}
+    <a class="pt-row" href="/team/inbox#alerts">
+      <span class="pt-ico">{{ icon('bell') }}</span>
+      <span class="pt-row-body">
+        <span class="pt-row-title">Alerts &amp; texts</span>
+        <span class="pt-row-sub">Browser alerts and SMS status</span>
+      </span>
+      <span class="pt-chev">{{ icon('chev') }}</span>
+    </a>
+    {% endif %}
+    <a class="pt-row" href="/team/help#install">
+      <span class="pt-ico">{{ icon('phone') }}</span>
+      <span class="pt-row-body"><span class="pt-row-title">Install on your phone</span></span>
+      <span class="pt-chev">{{ icon('chev') }}</span>
+    </a>
+    <a class="pt-row" href="/team/password/change">
+      <span class="pt-ico">{{ icon('key') }}</span>
+      <span class="pt-row-body"><span class="pt-row-title">Change password</span></span>
+      <span class="pt-chev">{{ icon('chev') }}</span>
+    </a>
+    {% if current_user and current_user.role in ("admin", "reviewer") %}
+      <a class="pt-row" href="/dashboard">
+        <span class="pt-ico">{{ icon('back') }}</span>
+        <span class="pt-row-body"><span class="pt-row-title">Back to Ops</span></span>
+        <span class="pt-chev">{{ icon('chev') }}</span>
+      </a>
+    {% endif %}
+    <form method="POST" action="/team/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token or '' }}">
+      <button type="submit" class="pt-row is-danger">
+        <span class="pt-ico">{{ icon('out') }}</span>
+        <span class="pt-row-body"><span class="pt-row-title">Sign out</span></span>
+      </button>
+    </form>
+  </div>
+
+</div>
+{% endblock %}

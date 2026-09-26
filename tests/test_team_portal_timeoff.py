@@ -201,23 +201,34 @@ class TeamTimeOffTests(unittest.TestCase):
         return templates.env.get_template("team/dashboard.html").render(context)
 
     def _timeoff_html(self, user) -> str:
+        # Phase 3: the time-off form moved into a sheet on /team/requests
+        # (team/timeoff.html is gone); render that page's new-request sheet.
         from app.routers.team import _nav_context
         from app.shared import templates
 
-        request = _FakeRequest(user, path="/team/timeoff")
+        request = _FakeRequest(user, path="/team/requests")
         context = {
             "request": request,
-            "title": "Time off",
+            "title": "Requests",
             "active": "time-off",
             "current_user": user,
-            "requests": [],
+            "kinds": ["timeoff"],
+            "can_submit": ["timeoff"],
+            "tab": "all",
+            "open_cards": [],
+            "past_cards": [],
+            "editable_cards": [],
+            "open_sheet": "pt-sheet-new-timeoff",
+            "prefill_date": "",
+            "prefill_overlaps": [],
+            "prefill_overlap_summary": "",
             "today": date.today().isoformat(),
             "flash": None,
             "error": None,
             "csrf_token": "test-token",
             **_nav_context(self.session, user),
         }
-        return templates.env.get_template("team/timeoff.html").render(context)
+        return templates.env.get_template("team/requests.html").render(context)
 
     def test_submit_valid_request(self):
         from app.models import AuditLog, TimeOffRequest
@@ -739,13 +750,55 @@ class TeamTimeOffTests(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(self.session.get(TimeOffRequest, row.id).status, "submitted")
 
-    def test_team_requests_alias_redirects_to_timeoff(self):
-        from app.routers.team_timeoff import team_requests_alias
+    def _requests_page(self, user):
+        from app.routers import team_timeoff
 
-        response = team_requests_alias()
+        captured = {}
 
-        self.assertEqual(response.status_code, 303)
-        self.assertEqual(response.headers["location"], "/team/timeoff")
+        def fake_response(request, template, context):
+            captured["template"] = template
+            captured["context"] = context
+            return SimpleNamespace(status_code=200, context=context)
+
+        request = _FakeRequest(user, path="/team/requests")
+        with patch.object(team_timeoff.templates, "TemplateResponse", side_effect=fake_response):
+            response = team_timeoff.team_requests(
+                request, tab=None, new=None, edit=None, id=None, date=None,
+                flash=None, error=None, session=self.session,
+            )
+        return response, captured
+
+    def test_team_requests_is_a_real_page_for_employees(self):
+        # Phase 3: /team/requests stopped redirecting to /team/timeoff and
+        # became the combined Requests page.
+        user = self._seed_user(41, username="emp_requests_tab")
+        response, captured = self._requests_page(user)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["template"], "team/requests.html")
+        self.assertEqual(captured["context"]["kinds"], ["timeoff", "supply"])
+
+    def test_team_requests_shows_supply_only_users_their_supply_requests(self):
+        # The phone "Requests" tab points here; a user without page.timeoff
+        # must get the page (supplies only) instead of a 403.
+        from app.models import RolePermission
+
+        row = self.session.exec(
+            select(RolePermission).where(
+                RolePermission.role == "employee",
+                RolePermission.resource_key == "page.timeoff",
+            )
+        ).first()
+        self.assertIsNotNone(row)
+        row.is_allowed = False
+        self.session.add(row)
+        self.session.commit()
+        user = self._seed_user(42, username="emp_supply_only")
+
+        response, captured = self._requests_page(user)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["context"]["kinds"], ["supply"])
 
     def test_admin_requests_alias_redirects(self):
         from app.routers.team_admin_timeoff import admin_requests_alias
@@ -760,7 +813,7 @@ class TeamTimeOffTests(unittest.TestCase):
 
         html = self._dashboard_html(employee)
 
-        self.assertIn('href="/team/timeoff"', html)
+        self.assertIn('href="/team/requests?tab=timeoff"', html)
 
 
 if __name__ == "__main__":

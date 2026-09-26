@@ -1,0 +1,202 @@
+{% extends "team/base.html" %}
+{#- Employee Requests (redesign Phase 3): time off + supplies in one list.
+    View-model comes from team_requests() in app/routers/team_timeoff.py and
+    the pure builders in app/team/requests_view.py.
+
+    Forms live in bottom sheets. Every sheet is rendered server-side; the one
+    named by ?new=… or ?edit=…&id=… is rendered open, the rest `hidden`, so
+    the whole page works without JavaScript. /static/portal-requests.js
+    only opens/closes sheets in place, checks dates as you pick them, and
+    refreshes the "you're scheduled" warning. -#}
+{% from "team/_icons.html" import icon %}
+{% set kinds = kinds|default([]) %}
+{% set can_submit = can_submit|default([]) %}
+{% set open_sheet = open_sheet|default('') %}
+{% set close_href = close_href|default('/team/requests') %}
+
+{% block page_header %}
+<div class="pt-topline">
+  <div>
+    <div class="pt-eyebrow">{% if 'timeoff' in kinds and 'supply' in kinds %}Time off &amp; supplies{% elif 'timeoff' in kinds %}Time off{% else %}Supplies{% endif %}</div>
+    <h1 class="pt-title">Requests</h1>
+  </div>
+</div>
+{% endblock %}
+
+{% block content %}
+{%- macro req_card(c) -%}
+<li class="pt-req" id="req-{{ c.kind }}-{{ c.id }}" data-status="{{ c.status }}">
+  <div class="pt-req-top">
+    <span class="pt-ico is-{{ 'info' if c.kind == 'timeoff' else 'purple' }}">{{ icon('beach' if c.kind == 'timeoff' else 'box') }}</span>
+    <span class="pt-row-body">
+      <span class="pt-row-title">{{ c.title }}</span>
+      <span class="pt-row-sub">{{ c.sub }}</span>
+    </span>
+    <span class="pt-pill {{ c.pill_tone }}">{{ c.pill }}</span>
+  </div>
+  {% if c.detail %}<p class="pt-req-detail">{{ c.detail|truncate(220, true, '…') }}</p>{% endif %}
+  {% if c.note %}<p class="pt-req-note"><span class="pt-req-note-by">Manager's note</span>{{ c.note }}</p>{% endif %}
+  {% if c.can_edit %}
+  <div class="pt-req-acts">
+    <a class="pt-btn sm" href="/team/requests?edit={{ c.kind }}&amp;id={{ c.id }}" data-sheet-open="{{ c.sheet_id }}" aria-haspopup="dialog">Edit</a>
+    <form method="post" action="/team/{{ c.kind }}/{{ c.id }}/cancel" data-confirm="Cancel this request? Your manager will be told.">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="pt-btn sm ghost is-danger" type="submit">Cancel request</button>
+    </form>
+  </div>
+  {% endif %}
+</li>
+{%- endmacro -%}
+
+{%- macro sheet(sheet_id, heading) -%}
+<section class="pt-sheet{% if open_sheet == sheet_id %} is-open{% endif %}" id="{{ sheet_id }}" role="dialog" aria-modal="true" aria-labelledby="{{ sheet_id }}-h" data-sheet{% if open_sheet != sheet_id %} hidden{% endif %}>
+  <h2 id="{{ sheet_id }}-h">{{ heading }}</h2>
+  {{ caller() }}
+</section>
+{%- endmacro -%}
+
+{%- macro sheet_actions(submit_label) -%}
+<div class="pt-sheet-acts">
+  <a class="pt-btn" href="{{ close_href }}" data-sheet-close>Close</a>
+  <button class="pt-btn primary" type="submit">{{ submit_label }}</button>
+</div>
+{%- endmacro -%}
+
+{%- macro timeoff_fields(prefix, start, end, reason, overlaps, summary) -%}
+<div class="pt-field">
+  <span class="pt-field-label">Dates</span>
+  <div class="pt-date-pair">
+    <label class="pt-date" for="{{ prefix }}-start"><span class="pt-date-lb">First day off</span>
+      <input class="pt-input" type="date" id="{{ prefix }}-start" name="start_date" min="{{ today }}"{% if start %} value="{{ start }}"{% endif %} required data-timeoff-start></label>
+    <label class="pt-date" for="{{ prefix }}-end"><span class="pt-date-lb">Last day off</span>
+      <input class="pt-input" type="date" id="{{ prefix }}-end" name="end_date" min="{{ start or today }}"{% if end %} value="{{ end }}"{% endif %} required data-timeoff-end></label>
+  </div>
+  <p class="pt-field-error" role="alert" data-date-error hidden></p>
+</div>
+<div class="pt-callout is-warn pt-overlap" aria-live="polite" data-overlap{% if not overlaps %} hidden{% endif %}>
+  {{ icon('info') }}
+  <div>
+    <b data-overlap-summary>{{ summary }}</b>
+    <ul class="pt-overlap-list" data-overlap-list>
+      {% for o in overlaps %}<li>{{ o.text }}</li>{% endfor %}
+    </ul>
+    <span class="pt-callout-line">Ask a teammate to cover, or say so in the reason.</span>
+  </div>
+</div>
+<div class="pt-field">
+  <label class="pt-field-label" for="{{ prefix }}-reason">Reason <span class="pt-dim">(optional)</span></label>
+  <textarea class="pt-textarea" id="{{ prefix }}-reason" name="reason" rows="3" maxlength="2000" placeholder="e.g. Family trip">{{ reason }}</textarea>
+</div>
+{%- endmacro -%}
+
+{%- macro supply_fields(prefix, title, description, urgency) -%}
+<div class="pt-field">
+  <label class="pt-field-label" for="{{ prefix }}-title">What do you need?</label>
+  <input class="pt-input" type="text" id="{{ prefix }}-title" name="title" required maxlength="200" placeholder="e.g. 100 top-loaders, penny sleeves" value="{{ title }}">
+</div>
+<div class="pt-field">
+  <label class="pt-field-label" for="{{ prefix }}-description">Any details? <span class="pt-dim">(optional)</span></label>
+  <textarea class="pt-textarea" id="{{ prefix }}-description" name="description" rows="3" maxlength="4000" placeholder="Quantity, preferred brand, where to order from…">{{ description }}</textarea>
+</div>
+<div class="pt-field">
+  <label class="pt-field-label" for="{{ prefix }}-urgency">How urgent?</label>
+  <select class="pt-select" id="{{ prefix }}-urgency" name="urgency">
+    <option value="low"{% if urgency == 'low' %} selected{% endif %}>Low — whenever</option>
+    <option value="normal"{% if urgency not in ('low', 'high') %} selected{% endif %}>Normal — this week</option>
+    <option value="high"{% if urgency == 'high' %} selected{% endif %}>High — ASAP</option>
+  </select>
+</div>
+{%- endmacro -%}
+
+<div class="pt-page-narrow pt-requests" data-requests data-overlap-url="/team/requests/overlap" data-close-href="{{ close_href }}">
+
+  {% if can_submit %}
+  <div class="pt-newreq{% if can_submit|length == 1 %} is-single{% endif %}">
+    {% if 'timeoff' in can_submit %}
+    <a class="pt-newreq-card" href="/team/requests?new=timeoff" data-sheet-open="pt-sheet-new-timeoff" aria-haspopup="dialog">
+      <span class="pt-ico is-info">{{ icon('beach') }}</span>
+      <span class="pt-newreq-l1">Time off</span>
+      <span class="pt-newreq-l2">Days you can't work</span>
+    </a>
+    {% endif %}
+    {% if 'supply' in can_submit %}
+    <a class="pt-newreq-card" href="/team/requests?new=supply" data-sheet-open="pt-sheet-new-supply" aria-haspopup="dialog">
+      <span class="pt-ico is-purple">{{ icon('box') }}</span>
+      <span class="pt-newreq-l1">Supplies</span>
+      <span class="pt-newreq-l2">Sleeves, toploaders, tape…</span>
+    </a>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if kinds|length > 1 %}
+  <nav class="pt-seg" aria-label="Show requests">
+    <a href="/team/requests"{% if tab == 'all' %} aria-current="page"{% endif %}>All</a>
+    <a href="/team/requests?tab=timeoff"{% if tab == 'timeoff' %} aria-current="page"{% endif %}>Time off</a>
+    <a href="/team/requests?tab=supply"{% if tab == 'supply' %} aria-current="page"{% endif %}>Supplies</a>
+  </nav>
+  {% endif %}
+
+  <section class="pt-section" aria-labelledby="pt-open-h">
+    <div class="pt-section-h"><h2 id="pt-open-h">Open</h2></div>
+    <ul class="pt-rows pt-reqs" data-open-list>
+      {% for c in open_cards %}{{ req_card(c) }}{% else %}<li class="pt-empty">Nothing waiting on a manager.</li>{% endfor %}
+    </ul>
+  </section>
+
+  <section class="pt-section" aria-labelledby="pt-past-h">
+    <div class="pt-section-h"><h2 id="pt-past-h">Past</h2></div>
+    <ul class="pt-rows pt-reqs" data-past-list>
+      {% for c in past_cards %}{{ req_card(c) }}{% else %}<li class="pt-empty">Approved, declined and cancelled requests show up here.</li>{% endfor %}
+    </ul>
+  </section>
+</div>
+
+{#- Sheets. The backdrop is a link so tapping it closes the sheet without JS. -#}
+<a class="pt-sheet-bg{% if open_sheet %} is-open{% endif %}" href="{{ close_href }}" tabindex="-1" aria-hidden="true" data-sheet-bg></a>
+
+{% if 'timeoff' in can_submit %}
+{% call sheet('pt-sheet-new-timeoff', 'Request time off') %}
+  <p class="pt-sheet-sub"><strong>What happens next:</strong> Managers review requests before the schedule is final. Your request stays pending until a manager approves or denies it.</p>
+  <form method="post" action="/team/timeoff" data-timeoff-form>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {{ timeoff_fields('new-timeoff', prefill_date, prefill_date, '', prefill_overlaps, prefill_overlap_summary) }}
+    {{ sheet_actions('Send request') }}
+  </form>
+{% endcall %}
+{% endif %}
+
+{% if 'supply' in can_submit %}
+{% call sheet('pt-sheet-new-supply', 'Request supplies') %}
+  <p class="pt-sheet-sub"><strong>What happens next:</strong> Requests go to the manager supply queue. Sending one does not place an order by itself; a manager decides whether to approve, deny, or mark it ordered.</p>
+  <form method="post" action="/team/supply">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {{ supply_fields('new-supply', '', '', 'normal') }}
+    {{ sheet_actions('Send request') }}
+  </form>
+{% endcall %}
+{% endif %}
+
+{% for c in editable_cards|default([]) %}
+  {% if c.kind == 'timeoff' %}
+  {% call sheet(c.sheet_id, 'Edit time-off request') %}
+    <p class="pt-sheet-sub">Your manager gets a notification that you changed it. It stays pending until they decide.</p>
+    <form method="post" action="/team/timeoff/{{ c.id }}/edit" data-timeoff-form>
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ timeoff_fields('edit-timeoff-' ~ c.id, c.start_iso, c.end_iso, c.reason, c.overlaps, c.overlap_summary) }}
+      {{ sheet_actions('Save changes') }}
+    </form>
+  {% endcall %}
+  {% else %}
+  {% call sheet(c.sheet_id, 'Edit supply request') %}
+    <p class="pt-sheet-sub">Your manager gets a notification that you changed it. It stays pending until they decide.</p>
+    <form method="post" action="/team/supply/{{ c.id }}/edit">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      {{ supply_fields('edit-supply-' ~ c.id, c.title, c.description, c.urgency) }}
+      {{ sheet_actions('Save changes') }}
+    </form>
+  {% endcall %}
+  {% endif %}
+{% endfor %}
+<script src="/static/portal-requests.js?v=2026092501" defer></script>
+{% endblock %}

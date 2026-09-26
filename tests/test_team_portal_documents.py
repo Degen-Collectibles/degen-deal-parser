@@ -1,4 +1,4 @@
-"""Regression tests for the employee-facing Documents page."""
+"""Regression tests for employee-facing Documents (now an Inbox filter)."""
 from __future__ import annotations
 
 import os
@@ -76,20 +76,28 @@ class TeamDocumentsTests(unittest.TestCase):
         return user
 
     def _documents_html(self, user) -> str:
-        from app.routers.team import TEAM_DOCUMENTS, _nav_context
-        from app.shared import templates
+        # Documents are listed in the Inbox's Documents filter since the
+        # redesign (Phase 4); render it through the real route.
+        from unittest.mock import patch
 
-        request = _FakeRequest(user)
-        context = {
-            "request": request,
-            "title": "Documents",
-            "active": "documents",
-            "current_user": user,
-            "documents": TEAM_DOCUMENTS,
-            "csrf_token": "test-token",
-            **_nav_context(self.session, user),
-        }
-        return templates.env.get_template("team/documents.html").render(context)
+        from app.routers import team_inbox
+
+        captured = {}
+
+        def fake_template_response(request, template, context):
+            captured["html"] = team_inbox.templates.env.get_template(template).render(context)
+            return SimpleNamespace(status_code=200)
+
+        with patch.object(
+            team_inbox.templates, "TemplateResponse", side_effect=fake_template_response
+        ):
+            team_inbox.team_inbox(
+                _FakeRequest(user, path="/team/inbox"),
+                filter="documents",
+                flash=None,
+                session=self.session,
+            )
+        return captured["html"]
 
     def test_documents_permission_seeded_for_all_portal_roles(self):
         from app.models import RolePermission
@@ -110,17 +118,21 @@ class TeamDocumentsTests(unittest.TestCase):
             },
         )
 
-    def test_sidebar_shows_documents_link(self):
+    def test_sidebar_shows_inbox_link_with_documents(self):
+        # One Inbox link replaces the Documents link; documents are one of
+        # its sections for anyone holding page.documents.
         from app.routers.team import _nav_context
 
         employee = self._seed_user(1)
 
-        nav = _nav_context(self.session, employee)["nav_items"]
+        ctx = _nav_context(self.session, employee)
 
         self.assertIn(
-            {"name": "documents", "label": "Documents", "href": "/team/documents"},
-            nav,
+            {"name": "inbox", "label": "Inbox", "href": "/team/inbox"},
+            ctx["nav_items"],
         )
+        self.assertNotIn("documents", [item["name"] for item in ctx["nav_items"]])
+        self.assertIn("document", ctx["inbox_kinds"])
 
     def test_documents_page_links_surprise_set_pdf(self):
         employee = self._seed_user(2)
@@ -128,29 +140,53 @@ class TeamDocumentsTests(unittest.TestCase):
         html = self._documents_html(employee)
 
         self.assertIn("TikTok Surprise Set Streamer Guide", html)
-        self.assertIn("/static/team-documents/surprise-set-guide.pdf", html)
-        self.assertIn("Open PDF", html)
+        self.assertIn('href="/static/team-documents/surprise-set-guide.pdf"', html)
+        # Opens in a new tab, like the old "Open PDF" button.
+        self.assertIn('target="_blank" rel="noopener"', html)
 
     def test_surprise_set_guide_source_exists(self):
         self.assertTrue((ROOT / "docs" / "team" / "surprise-set-guide.md").exists())
 
-    def test_documents_route_respects_permission(self):
+    def _deny(self, key: str):
         from app.models import RolePermission
-        from app.routers.team import team_documents
 
-        employee = self._seed_user(3)
         row = self.session.exec(
             select(RolePermission).where(
                 RolePermission.role == "employee",
-                RolePermission.resource_key == "page.documents",
+                RolePermission.resource_key == key,
             )
         ).one()
         row.is_allowed = False
         self.session.add(row)
         self.session.commit()
 
-        response = team_documents(_FakeRequest(employee), session=self.session)
+    def test_documents_route_redirects_to_inbox_filter(self):
+        from app.routers.team import team_documents
 
+        response = team_documents()
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/team/inbox?filter=documents")
+
+    def test_documents_respect_permission(self):
+        # Without page.documents the Inbox hides documents (and the filter
+        # falls back to All); with no Inbox section at all it's a 403, the
+        # same answer the old Documents page gave.
+        from app.routers.team_inbox import team_inbox
+
+        employee = self._seed_user(3)
+        self._deny("page.documents")
+
+        html = self._documents_html(employee)
+        self.assertNotIn("surprise-set-guide.pdf", html)
+
+        self._deny("page.announcements")
+        response = team_inbox(
+            _FakeRequest(employee, path="/team/inbox"),
+            filter="documents",
+            flash=None,
+            session=self.session,
+        )
         self.assertEqual(response.status_code, 403)
 
 

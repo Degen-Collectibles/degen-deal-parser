@@ -38,7 +38,7 @@
       <div class="pt-tour-panel is-active" data-tour-panel="0">
         <div class="pt-tour-kicker">Step 1 of 7</div>
         <h2>The left menu is your map.</h2>
-        <p>Scheduling? Admin > Schedule. Dashboard, Hours, Announcements, Notifications, Schedule, Time off, Policies, Supply, Profile, and Ops tools all sit in the left menu.</p>
+        <p>Scheduling? Admin > Schedule. Home, Schedule, Hours, Requests, Inbox, Policies, Profile, and Ops tools all sit in the left menu.</p>
       </div>
       <div class="pt-tour-panel" data-tour-panel="1">
         <div class="pt-tour-kicker">Step 2 of 7</div>
@@ -63,7 +63,7 @@
       <div class="pt-tour-panel" data-tour-panel="5">
         <div class="pt-tour-kicker">Step 6 of 7</div>
         <h2>Post where the team will actually see it.</h2>
-        <p>Announcements admin is for schedule changes, policy reminders, and team notes. Latest posts show up on the dashboard so nobody has to dig for them.</p>
+        <p>Announcements admin is for schedule changes, policy reminders, and team notes. Latest posts show up on Home and in everyone's Inbox, marked unread until they open them.</p>
       </div>
       <div class="pt-tour-panel" data-tour-panel="6">
         <div class="pt-tour-kicker">Step 7 of 7</div>
@@ -78,7 +78,7 @@
 
       {% if tutorial_links|default(false) %}
         <div class="pt-tour-actions">
-          <a href="/team/" class="pt-tour-open">Dashboard</a>
+          <a href="/team/" class="pt-tour-open">Home</a>
           <a href="{{ schedule_href|default('/team/schedule') }}" class="pt-tour-open">Schedule</a>
           <a href="/team/admin/schedule" class="pt-tour-open">Schedule people</a>
           <a href="/team/admin/employees" class="pt-tour-open">Employees</a>

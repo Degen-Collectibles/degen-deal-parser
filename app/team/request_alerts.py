@@ -165,6 +165,20 @@ def _send_discord_message(
     return DiscordSendResult(status="sent", message_id=message_id)
 
 
+# What happened to the request. New requests, and the employee editing or
+# cancelling a still-pending one, all go through the same alert path so
+# managers hear about changes the same way they hear about new requests.
+EVENT_SUBMITTED = "submitted"
+EVENT_EDITED = "edited"
+EVENT_CANCELLED = "cancelled"
+_EVENTS = (EVENT_SUBMITTED, EVENT_EDITED, EVENT_CANCELLED)
+
+
+def _event(value: str) -> str:
+    key = (value or "").strip().lower()
+    return key if key in _EVENTS else EVENT_SUBMITTED
+
+
 def send_supply_request_alert(
     *,
     request_id: Optional[int],
@@ -173,20 +187,37 @@ def send_supply_request_alert(
     title: str = "",
     description: str = "",
     urgency: str = "normal",
+    event: str = EVENT_SUBMITTED,
     settings: Optional[Settings] = None,
 ) -> RequestAlertResult:
     settings = settings or get_settings()
+    event = _event(event)
     employee = _display_employee(employee_name, employee_username)
     urgency_text = _clean(urgency or "normal", limit=40).lower() or "normal"
     title_text = _clean(title or "Untitled request", limit=180)
     description_text = _clean(description, limit=1200)
     queue_url = _absolute_url("/team/admin/supply", settings)
     request_line = f"Request ID: {request_id}" if request_id is not None else "Request ID: pending"
-    subject = f"[Degen] Supply request: {urgency_text} - {employee} - {title_text}"
+    subject_tag = {
+        EVENT_SUBMITTED: "Supply request",
+        EVENT_EDITED: "Supply request edited",
+        EVENT_CANCELLED: "Supply request cancelled",
+    }[event]
+    heading = {
+        EVENT_SUBMITTED: "New supply request",
+        EVENT_EDITED: "Supply request edited by the employee (still pending)",
+        EVENT_CANCELLED: "Supply request cancelled by the employee (no action needed)",
+    }[event]
+    discord_heading = {
+        EVENT_SUBMITTED: "**New Supply Request**",
+        EVENT_EDITED: "**Supply Request Edited**",
+        EVENT_CANCELLED: "**Supply Request Cancelled**",
+    }[event]
+    subject = f"[Degen] {subject_tag}: {urgency_text} - {employee} - {title_text}"
     body = "\n".join(
         part
         for part in (
-            "New supply request",
+            heading,
             "",
             f"Employee: {employee}",
             f"Urgency: {urgency_text}",
@@ -200,7 +231,7 @@ def send_supply_request_alert(
     discord_content = "\n".join(
         part
         for part in (
-            "**New Supply Request**",
+            discord_heading,
             f"Employee: {employee}",
             f"Urgency: {urgency_text.upper()}",
             f"Item: {title_text}",
@@ -250,20 +281,32 @@ def send_timeoff_request_alert(
     start_date: date | str,
     end_date: date | str,
     reason: str = "",
+    event: str = EVENT_SUBMITTED,
     settings: Optional[Settings] = None,
 ) -> RequestAlertResult:
     settings = settings or get_settings()
+    event = _event(event)
     employee = _display_employee(employee_name, employee_username)
     start_text = _clean(start_date, limit=40)
     end_text = _clean(end_date, limit=40)
     reason_text = _clean(reason, limit=1200)
     queue_url = _absolute_url("/team/admin/timeoff", settings)
     request_line = f"Request ID: {request_id}" if request_id is not None else "Request ID: pending"
-    subject = f"[Degen] Time-off request: {employee} - {start_text} to {end_text}"
+    subject_tag = {
+        EVENT_SUBMITTED: "Time-off request",
+        EVENT_EDITED: "Time-off request edited",
+        EVENT_CANCELLED: "Time-off request cancelled",
+    }[event]
+    heading = {
+        EVENT_SUBMITTED: "New time-off request pending approval",
+        EVENT_EDITED: "Time-off request edited by the employee, still pending approval",
+        EVENT_CANCELLED: "Time-off request cancelled by the employee (no action needed)",
+    }[event]
+    subject = f"[Degen] {subject_tag}: {employee} - {start_text} to {end_text}"
     body = "\n".join(
         part
         for part in (
-            "New time-off request pending approval",
+            heading,
             "",
             f"Employee: {employee}",
             f"Dates: {start_text} to {end_text}",

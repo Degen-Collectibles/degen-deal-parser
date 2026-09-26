@@ -18,11 +18,11 @@ import re
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -61,9 +61,6 @@ from ..models import (
     SCHEDULE_CALENDAR_PACKING,
     SCHEDULE_CALENDAR_STOREFRONT,
     SHIFT_KIND_ALL,
-    SHIFT_KIND_BLANK,
-    SHIFT_KIND_OFF,
-    SHIFT_KIND_REQUEST,
     SHIFT_KIND_WORK,
     ScheduleDayNote,
     ShiftEntry,
@@ -77,6 +74,11 @@ from ..models import (
 )
 from ..team.pii import PIIDecryptError, decrypt_pii, encrypt_pii
 from ..team.sms_consent import consent_context, record_consent
+from ..team import home as home_view
+from ..team import inbox as inbox_view
+from ..team import inbox_store
+from ..team.inbox import TEAM_DOCUMENTS  # noqa: F401 -- re-exported for callers/tests
+from ..team import schedule_view
 from ..team.shift_labels import parse_shift_start_minutes
 from ..rate_limit import rate_limited_or_429
 from ..shared import app_home_for_role, templates
@@ -124,22 +126,6 @@ LEGACY_POLICIES: tuple[dict, ...] = (
     },
 )
 LEGACY_POLICY_BY_ID = {p["id"]: p for p in LEGACY_POLICIES}
-
-
-TEAM_DOCUMENTS: tuple[dict[str, str], ...] = (
-    {
-        "title": "TikTok Surprise Set Streamer Guide",
-        "description": (
-            "How to build an official TikTok Surprise Set, explain the pool, "
-            "run dollar-start auctions, and keep the stream moving without "
-            "making guarantees."
-        ),
-        "category": "TikTok Live",
-        "updated": "2026-05-29",
-        "href": "/static/team-documents/surprise-set-guide.pdf",
-        "source_href": "/static/team-documents/surprise-set-guide.md",
-    },
-)
 
 
 # ---------------------------------------------------------------------------
@@ -777,44 +763,66 @@ def _nav_context(session: Session, user: User) -> dict:
     )
     schedule_href = "/team/schedule"
     keys = (
-        ("dashboard", "Dashboard", "page.dashboard", "/team/"),
-        ("hours", "Hours", "page.hours", "/team/hours"),
-        ("announcements", "Announcements", "page.announcements", "/team/announcements"),
-        ("notifications", "Notifications", "page.announcements", "/team/notifications"),
-        ("documents", "Documents", "page.documents", "/team/documents"),
+        # Order mirrors the phone tabs (redesign 2026-09): Home, Schedule,
+        # Hours, then Requests, then Inbox + Policies, then Profile. base.html
+        # groups these by name; the flat list stays the permission source of
+        # truth. "inbox" has no key of its own: it shows when the user may
+        # read announcements/updates (page.announcements) or documents
+        # (page.documents), and only those sections appear inside it.
+        ("dashboard", "Home", "page.dashboard", "/team/"),
         ("schedule", "Schedule", "page.schedule", schedule_href),
-        ("time-off", "Time off", "page.timeoff", "/team/timeoff"),
+        ("hours", "Hours", "page.hours", "/team/hours"),
+        ("time-off", "Time off", "page.timeoff", "/team/requests?tab=timeoff"),
+        ("supply", "Supply", "page.supply_requests", "/team/requests?tab=supply"),
+        ("inbox", "Inbox", None, "/team/inbox"),
         ("policies", "Policies", "page.policies", "/team/policies"),
-        ("supply", "Supply", "page.supply_requests", "/team/supply"),
         ("profile", "Profile", "page.profile", "/team/profile"),
     )
+    inbox_kinds = _inbox_kinds_for(session, user, cache=cache)
     nav = []
     for name, label, key, href in keys:
-        if has_permission(session, user, key, cache=cache):
+        if name == "inbox":
+            if inbox_kinds:
+                nav.append({"name": name, "label": label, "href": href})
+        elif has_permission(session, user, key, cache=cache):
             nav.append({"name": name, "label": label, "href": href})
 
     # Admin-only section. Rendered as a separate group in the sidebar when
     # at least one entry is visible. Gated per-key against the perms matrix
     # so managers/reviewers only see the admin links they actually have.
+    # Each entry also carries the gate its /team/admin route enforces
+    # (route permission key + whether the route requires role == "admin"
+    # via `_admin_gate`), so a link is never shown that would 403.
     admin_keys = (
-        ("employees", "Employees", "page.admin.employees", "/team/admin/employees"),
-        ("invites", "Invites", "page.admin.invites", "/team/admin/invites"),
-        ("permissions", "Permissions", "page.admin.permissions", "/team/admin/permissions"),
-        ("team-schedule", "Team schedule", "admin.schedule.view", "/team/admin/schedule"),
-        ("supply-queue", "Supply queue", "page.admin.supply", "/team/admin/supply"),
-        ("buylist-submissions", "Buylist queue", "admin.supply.view", "/team/admin/buylist/submissions"),
-        ("buylist", "Buylist pricing", "admin.supply.view", "/team/admin/buylist"),
-        ("time-off-queue", "Time off queue", "admin.timeoff.view", "/team/admin/timeoff"),
+        ("employees", "Employees", "page.admin.employees", "/team/admin/employees", "admin.employees.view", False),
+        ("invites", "Invites", "page.admin.invites", "/team/admin/invites", "admin.invites.view", True),
+        ("permissions", "Permissions", "page.admin.permissions", "/team/admin/permissions", "admin.permissions.view", True),
+        ("team-schedule", "Team schedule", "admin.schedule.view", "/team/admin/schedule", "admin.schedule.view", False),
+        ("supply-queue", "Supply queue", "page.admin.supply", "/team/admin/supply", "admin.supply.view", False),
+        ("buylist-submissions", "Buylist queue", "admin.supply.view", "/team/admin/buylist/submissions", "admin.supply.view", False),
+        ("buylist", "Buylist pricing", "admin.supply.view", "/team/admin/buylist", "admin.buylist.edit", False),
+        ("time-off-queue", "Time off queue", "admin.timeoff.view", "/team/admin/timeoff", "admin.timeoff.view", False),
         (
             "announcements-admin",
             "Announcements admin",
             "admin.announcements.view",
             "/team/admin/announcements",
+            "admin.announcements.view",
+            False,
         ),
     )
+    role = getattr(user, "role", None)
     admin_nav = []
-    for name, label, key, href in admin_keys:
-        if has_permission(session, user, key, cache=cache):
+    for name, label, key, href, route_key, admin_role_only in admin_keys:
+        # Mirror the route gates: `_permission_gate` has an
+        # admin/manager/reviewer role floor; `_admin_gate` requires admin.
+        if admin_role_only and role != "admin":
+            continue
+        if role not in {"admin", "manager", "reviewer"}:
+            continue
+        if has_permission(session, user, key, cache=cache) and has_permission(
+            session, user, route_key, cache=cache
+        ):
             admin_nav.append({"name": name, "label": label, "href": href})
 
     # Ops shortcuts are employee-facing tools. Keep them permission-filtered
@@ -838,7 +846,23 @@ def _nav_context(session: Session, user: User) -> dict:
         "tools_nav_items": ops_nav,
         "schedule_href": schedule_href,
         "can_edit_schedule": can_edit_schedule,
+        "inbox_kinds": inbox_kinds,
+        # Sidebar Inbox item, More row and More-tab badge all read this.
+        "inbox_unread": (
+            inbox_store.unread_count(session, user.id, kinds=inbox_kinds)
+            if inbox_kinds and user.id is not None
+            else 0
+        ),
     }
+
+
+def _inbox_kinds_for(session: Session, user: User, *, cache: Optional[dict] = None) -> tuple[str, ...]:
+    """Inbox sections this user may see, from the existing page.* keys."""
+    cache = cache if cache is not None else {}
+    return inbox_view.allowed_kinds(
+        can_announcements=has_permission(session, user, "page.announcements", cache=cache),
+        can_documents=has_permission(session, user, "page.documents", cache=cache),
+    )
 
 
 def _portal_now(*, settings=None, now: Optional[datetime] = None) -> datetime:
@@ -886,7 +910,7 @@ def team_dashboard(
     )
     dashboard_context: dict[str, Any] = {
         "request": request,
-        "title": "Dashboard",
+        "title": "Home",
         "active": "dashboard",
         "current_user": user,
         "widgets": widgets,
@@ -910,39 +934,23 @@ def team_dashboard(
                 .where(TimeOffRequest.status == "submitted")
             ).one()
         )
-    today = _portal_today(settings=settings)
-    today_shifts = _today_shifts_for(session, user, today=today)
-    upcoming_shifts = _upcoming_shifts_for(session, user, today=today, limit=5)
-    next_shift = next(
-        (shift for shift in upcoming_shifts if shift["shift_date"] > today),
-        upcoming_shifts[0] if upcoming_shifts else None,
-    )
-    pay_summary = _employee_dashboard_pay_summary(session, user, today=today)
-    active_announcements = _active_announcements_for(session, limit=3)
-    profile_completion = _profile_completion_for(
-        session,
-        user,
-        clockify_ready=clockify_ready,
-    )
+    now_local = _portal_now(settings=settings)
+    today = now_local.date()
     nav_ctx = _nav_context(session, user)
     dashboard_context.update(
+        _employee_home_context(
+            session,
+            user,
+            today=today,
+            now_local=now_local,
+            settings=settings,
+            clockify_ready=clockify_ready,
+            nav_ctx=nav_ctx,
+        )
+    )
+    dashboard_context.update(
         {
-            "dashboard_pay": pay_summary,
-            "today_shifts": today_shifts,
-            "next_shift": next_shift,
-            "upcoming_shifts": upcoming_shifts,
             "today_staffing": _today_staffing_for(session, today=today),
-            "active_announcements": active_announcements,
-            "profile_completion": profile_completion,
-            "today_focus": _today_focus_for(
-                today_shifts=today_shifts,
-                pay_summary=pay_summary,
-                announcements=active_announcements,
-                profile_completion=profile_completion,
-                schedule_href=nav_ctx["schedule_href"],
-            ),
-            "today_date": today,
-            "now_hour": _portal_now(settings=settings).hour,
             "csrf_token": issue_token(request),
             **nav_ctx,
         }
@@ -952,6 +960,237 @@ def team_dashboard(
         "team/dashboard.html",
         dashboard_context,
     )
+
+
+
+def _clock_status_from_week(week: dict[str, Any], *, today: date) -> dict[str, Any]:
+    """Today's Clockify state for the Home hero, from employee_week_hours()."""
+    status: dict[str, Any] = {
+        "linked": bool(week.get("linked")) and not week.get("error"),
+        "running": False,
+        "on_break": False,
+        "since": None,
+        "today_seconds": 0,
+    }
+    if not status["linked"] or not week.get("entries"):
+        return status
+    from .team_admin_clockify import _clockify_entry_is_break
+
+    start_local = week["start_local"]
+    day_start = datetime.combine(today, time.min, tzinfo=start_local.tzinfo)
+    day_end = day_start + timedelta(days=1)
+    todays = [
+        row
+        for row in week["entries"]
+        if _entry_overlap_seconds(row, day_start, day_end) > 0
+    ]
+    work = [row for row in todays if not _clockify_entry_is_break(row)]
+    running_work = [row for row in work if row.running]
+    running_break = [
+        row for row in todays if row.running and _clockify_entry_is_break(row)
+    ]
+    status["running"] = bool(running_work or running_break)
+    status["on_break"] = bool(running_break) and not running_work
+    starts = [row.start_local for row in work if row.start_local is not None]
+    status["since"] = min(starts) if starts else None
+    status["today_seconds"] = week["adjusted_by_day"].get(today, (0, 0, 0))[0]
+    return status
+
+
+def _approved_timeoff_days(
+    session: Session, user_id: int, first_day: date, last_day: date
+) -> set[date]:
+    """Days in [first_day, last_day] covered by the user's approved time off."""
+    days: set[date] = set()
+    for row in session.exec(
+        select(TimeOffRequest)
+        .where(TimeOffRequest.submitted_by_user_id == user_id)
+        .where(TimeOffRequest.status == "approved")
+        .where(TimeOffRequest.start_date <= last_day)
+        .where(TimeOffRequest.end_date >= first_day)
+    ).all():
+        cursor = max(row.start_date, first_day)
+        while cursor <= min(row.end_date, last_day):
+            days.add(cursor)
+            cursor += timedelta(days=1)
+    return days
+
+
+def _week_range_label(start: date) -> str:
+    end = start + timedelta(days=6)
+    if start.month == end.month:
+        return f"{home_view.month_day(start)} – {end.day}"
+    return f"{home_view.month_day(start)} – {home_view.month_day(end)}"
+
+
+def _employee_home_context(
+    session: Session,
+    user: User,
+    *,
+    today: date,
+    now_local: datetime,
+    settings=None,
+    clockify_ready: bool = False,
+    nav_ctx: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Everything the Home screen (team/dashboard.html) renders.
+
+    Pay periods are not modelled anywhere in the app (the payroll export
+    works on arbitrary Mon-Sun windows and defaults to last week), so the
+    first tile shows last week's Clockify total and the second shows this
+    week worked vs scheduled. No estimated pay on Home, by design.
+    """
+    settings = settings or get_settings()
+    nav_ctx = nav_ctx if nav_ctx is not None else _nav_context(session, user)
+    nav_names = {item["name"] for item in nav_ctx.get("nav_items", [])}
+    schedule_href = nav_ctx.get("schedule_href") or "/team/schedule"
+    can_timeoff = "time-off" in nav_names
+    can_supply = "supply" in nav_names
+    can_hours = "hours" in nav_names
+
+    today_shifts, upcoming_shifts = _home_hero_shifts(session, user, today=today)
+
+    # --- Clockify: this week + last week (same helper /team/hours uses) ---
+    week_start = today - timedelta(days=today.weekday())
+    last_start = week_start - timedelta(days=7)
+    week = employee_week_hours(session, user, today=today, settings=settings)
+    last_week = (
+        employee_week_hours(
+            session, user, today=today, week_of=last_start, settings=settings
+        )
+        if week.get("linked")
+        else None
+    )
+    clock = _clock_status_from_week(week, today=today)
+
+    # --- This week's own schedule (week strip + scheduled hours) ---
+    # Same sources and rules as /team/hours (ShiftEntry per calendar plus
+    # Stream Manager shifts, shaped by schedule_view.build_my_week), so the
+    # "scheduled" number on Home always matches the Hours page.
+    week_end = week_start + timedelta(days=6)
+    week_days = [week_start + timedelta(days=i) for i in range(7)]
+    timeoff_days = _approved_timeoff_days(session, user.id, week_start, week_end)
+    my_week = schedule_view.build_my_week(
+        week_days=week_days,
+        today=today,
+        me_id=user.id,
+        calendars=_my_schedule_calendars(session, user, week_days),
+        timeoff_days=timeoff_days,
+    )
+    shifts_by_day: dict[date, list[str]] = {
+        # Normalised time ("6:00 PM – 12:00 AM"), not the raw label: Stream
+        # Manager labels read "6:00 PM - 12:00 AM (next day)".
+        day["date"]: [shift["time"] or shift["label"] for shift in day["shifts"]]
+        for day in my_week["days"]
+        if day["shifts"]
+    }
+    scheduled = float(my_week["scheduled_hours"] or 0)
+
+    linked = bool(week.get("linked"))
+    week_ok = linked and not week.get("error")
+    last_ok = bool(last_week) and not last_week.get("error")
+    tiles = {
+        "linked": linked,
+        "error": week.get("error") or "",
+        "last_week_value": (
+            home_view.hours_number(last_week["total_work_seconds"]) if last_ok else "–"
+        ),
+        "last_week_sub": _week_range_label(last_start),
+        "week_value": (
+            home_view.hours_number(week["total_work_seconds"]) if week_ok else "–"
+        ),
+        "week_scheduled": (
+            home_view.hours_number_from_hours(scheduled) if scheduled else ""
+        ),
+        "href": "/team/hours" if can_hours else "",
+    }
+
+    profile_completion = _profile_completion_for(
+        session, user, clockify_ready=clockify_ready
+    )
+    needs_you = home_view.build_needs_you(
+        profile_completion=profile_completion,
+        needs_fix_days=week.get("needs_fix_days") or [],
+        clockify_configured=clockify_ready,
+    )
+    request_rows = home_view.build_request_rows(
+        timeoff=(
+            session.exec(
+                select(TimeOffRequest)
+                .where(TimeOffRequest.submitted_by_user_id == user.id)
+                .order_by(TimeOffRequest.created_at.desc())
+                .limit(5)
+            ).all()
+            if can_timeoff
+            else []
+        ),
+        supply=(
+            session.exec(
+                select(SupplyRequest)
+                .where(SupplyRequest.submitted_by_user_id == user.id)
+                .order_by(SupplyRequest.created_at.desc())
+                .limit(5)
+            ).all()
+            if can_supply
+            else []
+        ),
+        limit=3,
+        tz=now_local.tzinfo,
+    )
+    can_announcements = inbox_view.KIND_ANNOUNCEMENT in (nav_ctx.get("inbox_kinds") or ())
+    latest = _active_announcements_for(session, limit=1) if can_announcements else []
+    latest_unread = bool(latest) and inbox_view.is_unread(
+        inbox_view.KIND_ANNOUNCEMENT,
+        str(latest[0].id),
+        latest[0].published_at,
+        inbox_store.read_keys(session, user.id, (inbox_view.KIND_ANNOUNCEMENT,)),
+        utcnow(),
+        pinned=bool(latest[0].pinned),
+    )
+    hero = home_view.build_hero(
+        now_local=now_local,
+        today=today,
+        today_shifts=today_shifts,
+        upcoming_shifts=upcoming_shifts,
+        clock=clock,
+        schedule_href=schedule_href,
+        timeoff_href="/team/requests?new=timeoff" if can_timeoff else None,
+        hours_href="/team/hours" if can_hours else None,
+    )
+    name = (user.display_name or user.username or "").strip()
+    return {
+        "today_date": today,
+        "now_hour": now_local.hour,
+        "today_shifts": today_shifts,
+        "upcoming_shifts": upcoming_shifts,
+        "profile_completion": profile_completion,
+        "home": {
+            "eyebrow": f"{today:%A}, {home_view.month_day(today)}",
+            "first_name": name.split()[0] if name else "there",
+            "initials": "".join(part[0] for part in name.split()[:2]).upper() or "?",
+            "hero": hero,
+            "tiles": tiles,
+            "needs_you": needs_you,
+            "week": home_view.build_week_strip(
+                week_start=week_start,
+                today=today,
+                shifts_by_day=shifts_by_day,
+                timeoff_days=timeoff_days,
+            ),
+            "requests": request_rows,
+            "can_requests": can_timeoff or can_supply,
+            "latest": latest[0] if latest else None,
+            "latest_unread": latest_unread,
+            "latest_posted": (
+                home_view.month_day(
+                    inbox_view.as_utc(latest[0].published_at).astimezone(now_local.tzinfo).date()
+                )
+                if latest and latest[0].published_at
+                else ""
+            ),
+            "schedule_href": schedule_href,
+        },
+    }
 
 
 def _format_money_label(cents: int) -> str:
@@ -1298,25 +1537,7 @@ def _active_announcements_for(
     *,
     limit: Optional[int] = None,
 ) -> list[TeamAnnouncement]:
-    now = utcnow()
-    stmt = (
-        select(TeamAnnouncement)
-        .where(TeamAnnouncement.is_active == True)  # noqa: E712
-        .where(
-            or_(
-                TeamAnnouncement.expires_at.is_(None),
-                TeamAnnouncement.expires_at > now,
-            )
-        )
-        .order_by(
-            TeamAnnouncement.pinned.desc(),
-            TeamAnnouncement.published_at.desc(),
-            TeamAnnouncement.id.desc(),
-        )
-    )
-    if limit is not None:
-        stmt = stmt.limit(limit)
-    return list(session.exec(stmt).all())
+    return inbox_store.active_announcements(session, limit=limit)
 
 
 def _policy_from_row(row: TeamPolicy) -> dict[str, Any]:
@@ -1457,91 +1678,6 @@ def _profile_completion_for(
     }
 
 
-def _today_focus_for(
-    *,
-    today_shifts: list[dict[str, Any]],
-    pay_summary: dict[str, Any],
-    announcements: list[TeamAnnouncement],
-    profile_completion: dict[str, Any],
-    schedule_href: str,
-) -> dict[str, Any]:
-    shift_text = (
-        "; ".join(
-            (row.get("label") or "Shift").strip()
-            for row in today_shifts
-            if (row.get("label") or "").strip()
-        )
-        or "You are scheduled today."
-        if today_shifts
-        else "No shift today."
-    )
-    clocked_in = (pay_summary.get("clocked_in_today_label") or "").strip()
-    break_label = (pay_summary.get("break_today_label") or "Not yet").strip()
-    missing_policies = profile_completion.get("missing_policies") or []
-    items = [
-        {
-            "label": "Shift",
-            "value": shift_text,
-            "href": schedule_href,
-            "state": "ok" if today_shifts else "neutral",
-        },
-        {
-            "label": "Clock status",
-            "value": (
-                f"Clocked in at {clocked_in}."
-                if clocked_in and clocked_in != "Not clocked in"
-                else "Clock in from the shop iPad when you arrive."
-            ),
-            "href": "/team/hours",
-            "state": (
-                "ok"
-                if clocked_in and clocked_in != "Not clocked in"
-                else ("todo" if today_shifts else "neutral")
-            ),
-        },
-        {
-            "label": "Break",
-            "value": (
-                "Break recorded."
-                if break_label.startswith(("Taken", "On break"))
-                else (
-                    "No break clocked yet. If a 5+ hour shift misses a break, 30 minutes is deducted."
-                    if today_shifts
-                    else "No break needed unless you work today."
-                )
-            ),
-            "href": "/team/hours",
-            "state": (
-                "ok"
-                if break_label.startswith(("Taken", "On break"))
-                else ("todo" if today_shifts else "neutral")
-            ),
-        },
-        {
-            "label": "Announcements",
-            "value": (
-                f"{len(announcements)} current update{'s' if len(announcements) != 1 else ''}."
-                if announcements
-                else "Nothing new right now."
-            ),
-            "href": "/team/announcements",
-            "state": "todo" if announcements else "ok",
-        },
-        {
-            "label": "Policies",
-            "value": (
-                f"{len(missing_policies)} unsigned polic{'ies' if len(missing_policies) != 1 else 'y'}."
-                if missing_policies
-                else "All signed."
-            ),
-            "href": "/team/policies",
-            "state": "todo" if missing_policies else "ok",
-        },
-    ]
-    todo_count = sum(1 for item in items if item["state"] == "todo")
-    return {"items": items, "todo_count": todo_count}
-
-
 def _employee_notifications_for(
     session: Session,
     user: User,
@@ -1622,84 +1758,17 @@ def team_notifications_poll(
     }
 
 
-@router.get("/team/announcements", response_class=HTMLResponse)
-def team_announcements(
-    request: Request,
-    session: Session = Depends(get_session),
-):
-    denial, user = _require_employee(
-        request, session, resource_key="page.announcements"
-    )
-    if denial:
-        return denial
-
-    announcements = _active_announcements_for(session)
-    creator_ids = {
-        row.created_by_user_id
-        for row in announcements
-        if row.created_by_user_id is not None
-    }
-    authors: dict[int, User] = {}
-    if creator_ids:
-        authors = {
-            author.id: author
-            for author in session.exec(
-                select(User).where(User.id.in_(creator_ids))
-            ).all()
-            if author.id is not None
-        }
-
-    return templates.TemplateResponse(
-        request,
-        "team/announcements.html",
-        {
-            "request": request,
-            "title": "Announcements",
-            "active": "announcements",
-            "current_user": user,
-            "announcements": announcements,
-            "authors": authors,
-            "csrf_token": issue_token(request),
-            **_nav_context(session, user),
-        },
-    )
+# The three old reading pages merged into /team/inbox (redesign Phase 4).
+# GETs redirect to the matching filter so bookmarks, SMS links and stored
+# notification `link_path`s keep working. The Inbox does the auth check.
+@router.get("/team/announcements")
+def team_announcements():
+    return RedirectResponse("/team/inbox?filter=announcements", status_code=303)
 
 
-@router.get("/team/notifications", response_class=HTMLResponse)
-def team_notifications(
-    request: Request,
-    session: Session = Depends(get_session),
-):
-    denial, user = _require_employee(
-        request, session, resource_key="page.announcements"
-    )
-    if denial:
-        return denial
-    profile_completion = _profile_completion_for(session, user)
-    timeoff_rows = session.exec(
-        select(TimeOffRequest)
-        .where(TimeOffRequest.submitted_by_user_id == user.id)
-        .where(TimeOffRequest.status.in_(("approved", "denied")))
-        .order_by(TimeOffRequest.updated_at.desc(), TimeOffRequest.id.desc())
-        .limit(5)
-    ).all()
-    return templates.TemplateResponse(
-        request,
-        "team/notifications.html",
-        {
-            "request": request,
-            "title": "Notifications",
-            "active": "notifications",
-            "current_user": user,
-            "notifications": _employee_notifications_for(session, user),
-            "active_announcements": _active_announcements_for(session, limit=5),
-            "timeoff_rows": list(timeoff_rows),
-            "profile_completion": profile_completion,
-            "sms_enabled": consent_context(session, user.id)["opted_in"],
-            "csrf_token": issue_token(request),
-            **_nav_context(session, user),
-        },
-    )
+@router.get("/team/notifications")
+def team_notifications():
+    return RedirectResponse("/team/inbox?filter=updates", status_code=303)
 
 
 @router.get("/team/help", response_class=HTMLResponse)
@@ -1719,7 +1788,7 @@ def team_help(
         {
             "request": request,
             "title": "Ask for Help",
-            "active": "",
+            "active": "help",
             "current_user": user,
             "flash": flash,
             "error": error,
@@ -1784,6 +1853,45 @@ async def team_help_post(
     return RedirectResponse("/team/help?flash=Help+request+sent.", status_code=303)
 
 
+@router.get("/team/more", response_class=HTMLResponse)
+def team_more(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    """Phone "More" tab: profile, reading, ops tools by role, help, sign out.
+
+    No resource gate of its own: every link on the page is filtered through
+    the same `_nav_context` permission checks as the sidebar, so it can only
+    ever list pages this user may open.
+    """
+    denial, user = _require_employee(request, session)
+    if denial:
+        return denial
+    nav_ctx = _nav_context(session, user)
+    nav_names = {item["name"] for item in nav_ctx["nav_items"]}
+    completion = (
+        _profile_completion_for(session, user)
+        if "profile" in nav_names or "policies" in nav_names
+        else None
+    )
+    return templates.TemplateResponse(
+        request,
+        "team/more.html",
+        {
+            "request": request,
+            "title": "More",
+            "active": "more",
+            "current_user": user,
+            "profile_completion": completion,
+            "unsigned_policy_count": (
+                len(completion["missing_policies"]) if completion else 0
+            ),
+            "csrf_token": issue_token(request),
+            **nav_ctx,
+        },
+    )
+
+
 @router.get("/team/help/tutorial", response_class=HTMLResponse)
 def team_help_tutorial(
     request: Request,
@@ -1798,7 +1906,7 @@ def team_help_tutorial(
         {
             "request": request,
             "title": "Portal Tour",
-            "active": "",
+            "active": "help",
             "current_user": user,
             "csrf_token": issue_token(request),
             "tutorial_links": True,
@@ -1846,121 +1954,43 @@ def team_tool_live_stream(
 _parse_shift_start_minutes = parse_shift_start_minutes
 
 
-def _schedule_calendar_label(calendar_kind: str) -> str:
-    if calendar_kind == SCHEDULE_CALENDAR_PACKING:
-        return "Packing"
-    if calendar_kind == SCHEDULE_CALENDAR_STOREFRONT:
-        return "Storefront"
-    return "Schedule"
+# How far ahead Home looks for "Next shift". The old ShiftEntry-only query
+# had no horizon; six weeks covers any schedule actually posted.
+_HOME_SHIFT_LOOKAHEAD_DAYS = 42
 
 
-def _today_shifts_for(
+def _home_hero_shifts(
     session: Session,
     user: User,
     *,
-    today: Optional[date] = None,
-) -> list[dict[str, Any]]:
-    today = today or _portal_today()
-    shifts = list(
-        session.exec(
-            select(ShiftEntry)
-            .where(ShiftEntry.user_id == user.id)
-            .where(ShiftEntry.shift_date == today)
-            .where(
-                ~ShiftEntry.kind.in_(
-                    (SHIFT_KIND_REQUEST, SHIFT_KIND_OFF, SHIFT_KIND_BLANK)
-                )
-            )
-            .order_by(ShiftEntry.sort_order, ShiftEntry.id)
-        ).all()
-    )
-    if not shifts:
-        return []
+    today: date,
+    lookahead_days: int = _HOME_SHIFT_LOOKAHEAD_DAYS,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Today's and upcoming shifts for the Home hero.
 
-    day_note_row = session.exec(
-        select(ScheduleDayNote).where(ScheduleDayNote.day_date == today)
-    ).first()
-    day_note = None
-    if day_note_row is not None:
-        day_note = (
-            (day_note_row.location_label or "").strip()
-            or (day_note_row.notes or "").strip()
-            or None
-        )
-    return [
-        {
-            "shift_date": shift.shift_date,
-            "label": shift.label,
-            "kind": shift.kind,
-            "calendar_kind": shift.calendar_kind,
-            "calendar_label": _schedule_calendar_label(shift.calendar_kind),
-            "day_note": (
-                day_note
-                if shift.calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
-                else None
-            ),
-        }
-        for shift in shifts
-    ]
-
-
-def _upcoming_shifts_for(
-    session: Session,
-    user: User,
-    *,
-    today: Optional[date] = None,
-    limit: int = 5,
-) -> list[dict[str, Any]]:
-    today = today or _portal_today()
-    shifts = list(
-        session.exec(
-            select(ShiftEntry)
-            .where(ShiftEntry.user_id == user.id)
-            .where(ShiftEntry.shift_date >= today)
-            .where(
-                ~ShiftEntry.kind.in_(
-                    (SHIFT_KIND_REQUEST, SHIFT_KIND_OFF, SHIFT_KIND_BLANK)
-                )
-            )
-            .order_by(ShiftEntry.shift_date, ShiftEntry.sort_order, ShiftEntry.id)
-            .limit(limit)
-        ).all()
-    )
-    if not shifts:
-        return []
-
-    dates = sorted({shift.shift_date for shift in shifts})
-    notes = {
-        note.day_date: note
+    Same combined source as Schedule, Hours and the Home week strip
+    (``_my_schedule_calendars``: ShiftEntry per calendar plus Stream Manager
+    shifts), starting yesterday so an overnight shift that is still running
+    counts as today.
+    """
+    days = [today + timedelta(days=offset) for offset in range(-1, lookahead_days + 1)]
+    day_notes = {
+        note.day_date.isoformat(): (note.location_label or "").strip()
         for note in session.exec(
-            select(ScheduleDayNote).where(ScheduleDayNote.day_date.in_(dates))
+            select(ScheduleDayNote)
+            .where(ScheduleDayNote.day_date >= days[0])
+            .where(ScheduleDayNote.day_date <= days[-1])
         ).all()
+        if (note.location_label or "").strip()
     }
-    out: list[dict[str, Any]] = []
-    for shift in shifts:
-        day_note_row = notes.get(shift.shift_date)
-        day_note = None
-        if day_note_row is not None:
-            day_note = (
-                (day_note_row.location_label or "").strip()
-                or (day_note_row.notes or "").strip()
-                or None
-            )
-        out.append(
-            {
-                "shift_date": shift.shift_date,
-                "label": shift.label,
-                "kind": shift.kind,
-                "calendar_kind": shift.calendar_kind,
-                "calendar_label": _schedule_calendar_label(shift.calendar_kind),
-                "day_note": (
-                    day_note
-                    if shift.calendar_kind == SCHEDULE_CALENDAR_STOREFRONT
-                    else None
-                ),
-            }
-        )
-    return out
+    my_days = schedule_view.build_my_week(
+        week_days=days,
+        today=today,
+        me_id=user.id,
+        calendars=_my_schedule_calendars(session, user, days),
+        day_notes=day_notes,
+    )["days"]
+    return schedule_view.hero_shifts(my_days, today=today)
 
 
 def _today_staffing_for(
@@ -2337,27 +2367,9 @@ async def team_password_change_post(
     )
 
 
-@router.get("/team/documents", response_class=HTMLResponse)
-def team_documents(
-    request: Request,
-    session: Session = Depends(get_session),
-):
-    denial, user = _require_employee(request, session, resource_key="page.documents")
-    if denial:
-        return denial
-    return templates.TemplateResponse(
-        request,
-        "team/documents.html",
-        {
-            "request": request,
-            "title": "Documents",
-            "active": "documents",
-            "current_user": user,
-            "documents": TEAM_DOCUMENTS,
-            "csrf_token": issue_token(request),
-            **_nav_context(session, user),
-        },
-    )
+@router.get("/team/documents")
+def team_documents():
+    return RedirectResponse("/team/inbox?filter=documents", status_code=303)
 
 
 @router.get("/team/policies", response_class=HTMLResponse)
@@ -2445,6 +2457,42 @@ def _parse_employee_week(value: Optional[str], this_week_start: date) -> date:
     return max(week_start, earliest)
 
 
+def _my_schedule_calendars(
+    session: Session, user: User, week_days: list[date]
+) -> list[dict[str, Any]]:
+    """The current user's own schedule rows for one week, per calendar.
+
+    Same sources the schedule grid reads (ShiftEntry per calendar, Stream
+    Manager hints for Stream), limited to one person so /team/hours can put
+    scheduled hours next to worked hours without building the whole grid.
+    """
+    from .team_admin_schedule import _stream_schedule_hint_map
+    from ..models import SCHEDULE_CALENDAR_PACKING, SCHEDULE_CALENDAR_STOREFRONT
+
+    by_kind: dict[str, dict[tuple[int, str], list[ShiftEntry]]] = {
+        SCHEDULE_CALENDAR_STOREFRONT: {},
+        SCHEDULE_CALENDAR_PACKING: {},
+    }
+    for row in session.exec(
+        select(ShiftEntry)
+        .where(ShiftEntry.user_id == user.id)
+        .where(ShiftEntry.shift_date >= week_days[0])
+        .where(ShiftEntry.shift_date <= week_days[-1])
+        .order_by(ShiftEntry.shift_date, ShiftEntry.sort_order, ShiftEntry.id)
+    ).all():
+        bucket = by_kind.setdefault(row.calendar_kind or SCHEDULE_CALENDAR_STOREFRONT, {})
+        bucket.setdefault((row.user_id, row.shift_date.isoformat()), []).append(row)
+    stream_hints, _legend = _stream_schedule_hint_map(session, week_days, {user.id})
+    return [
+        {"kind": schedule_view.LOCATION_STOREFRONT, "label": "Storefront",
+         "entries": by_kind.get(SCHEDULE_CALENDAR_STOREFRONT, {})},
+        {"kind": schedule_view.LOCATION_PACKING, "label": "Packing",
+         "entries": by_kind.get(SCHEDULE_CALENDAR_PACKING, {})},
+        {"kind": schedule_view.LOCATION_STREAM, "label": "Stream",
+         "entries": stream_hints},
+    ]
+
+
 @router.get("/team/hours", response_class=HTMLResponse)
 def team_hours(
     request: Request,
@@ -2461,43 +2509,68 @@ def team_hours(
     today = _portal_today(settings=settings)
     this_week_start = today - timedelta(days=today.weekday())
     week_of = _parse_employee_week(week, this_week_start)
-    # Same helper the dashboard widget uses. This page used to call Clockify
-    # directly and sum raw durations, so it reported more hours than the
-    # dashboard -- and more than payroll pays -- for the same week.
+    # Same helper the Home tiles use, so both report the hours payroll pays
+    # (breaks excluded, missed-break deduction applied).
     week_data = employee_week_hours(
         session, user, today=today, week_of=week_of, settings=settings
     )
-    # Estimated pay is only meaningful for the current week; the dashboard
-    # summary is week-relative and would otherwise misreport a past window.
     is_this_week = week_data["week_start"] == this_week_start
-    pay = (
-        _employee_dashboard_pay_summary(session, user, week=week_data)
-        if is_this_week
-        else {
-            "estimated_pay_label": "",
-            "pay_basis": "",
-            "clockify_user_id": week_data["linked"]
-            and (session.get(EmployeeProfile, user.id).clockify_user_id or "")
-            or "",
-        }
+    profile = session.get(EmployeeProfile, user.id)
+    clockify_user_id = (
+        (profile.clockify_user_id or "").strip() if profile and week_data["linked"] else ""
     )
+
+    # No estimated pay on this page, by design (PRD 2026-09 decision): it
+    # was a guess that disagreed with real paychecks.
+    hours_view: dict[str, Any] = {}
+    if clockify_ready and clockify_user_id and not week_data["error"]:
+        from .team_admin_clockify import _clockify_entry_is_break
+
+        week_start = week_data["week_start"]
+        week_days = [week_start + timedelta(days=i) for i in range(7)]
+        my_week = schedule_view.build_my_week(
+            week_days=week_days,
+            today=today,
+            me_id=user.id,
+            calendars=_my_schedule_calendars(session, user, week_days),
+            timeoff_days=_approved_timeoff_days(
+                session, user.id, week_days[0], week_days[-1]
+            ),
+        )
+        entries = [
+            {
+                "start_local": row.start_local,
+                "end_local": row.end_local,
+                "duration_seconds": row.duration_seconds,
+                "running": row.running,
+                "description": row.description,
+                "is_break": _clockify_entry_is_break(row),
+            }
+            for row in week_data["entries"]
+        ]
+        hours_view = schedule_view.build_hours_view(
+            week=week_data, my_days=my_week["days"], entries=entries, today=today
+        )
+
+    week_start = week_data["week_start"]
     return templates.TemplateResponse(
         request,
         "team/hours.html",
         {
             "request": request,
-            "title": "My Hours",
+            "title": "Hours",
             "active": "hours",
             "current_user": user,
             "clockify_ready": clockify_ready,
-            "clockify_user_id": pay["clockify_user_id"],
+            "clockify_user_id": clockify_user_id,
             "week": week_data,
-            "pay": pay,
+            "hours": hours_view,
             "is_this_week": is_this_week,
-            "prev_week": (week_data["week_start"] - timedelta(days=7)).isoformat(),
-            "next_week": (week_data["week_start"] + timedelta(days=7)).isoformat(),
+            "week_label": schedule_view.week_label(week_start),
+            "prev_week": (week_start - timedelta(days=7)).isoformat(),
+            "next_week": (week_start + timedelta(days=7)).isoformat(),
             "this_week": this_week_start.isoformat(),
-            "can_go_forward": week_data["week_start"] < this_week_start,
+            "can_go_forward": week_start < this_week_start,
             "clockify_error": week_data["error"],
             "format_hours": format_hours,
             "csrf_token": issue_token(request),
@@ -2510,37 +2583,111 @@ def team_hours(
 def team_schedule(
     request: Request,
     week: Optional[str] = Query(default=None),
+    view: Optional[str] = Query(default=None),
     session: Session = Depends(get_session),
 ):
     denial, user = _require_employee(request, session, resource_key="page.schedule")
     if denial:
         return denial
-    # Reuse the admin grid builder so the employee view is literally the
-    # same visual — no translation layer, no "my shifts" fork. Everyone
-    # sees the published grid the same way; only the top-level wrapper
-    # differs (admin has inputs, employee has static cells).
-    from .team_admin_schedule import (
-        _build_cell_key,
-        _build_day_loc_key,
-        _grid_context,
-        _parse_week_start,
-    )
+    # Same data the admin grid reads (entry_map per calendar + Stream
+    # Manager hints), reshaped into lists in app/team/schedule_view.py so a
+    # phone never has to scroll a 1000px grid sideways.
+    from .team_admin_schedule import _grid_context, _parse_week_start
     from ..models import (
         SCHEDULE_CALENDAR_PACKING,
         SCHEDULE_CALENDAR_STOREFRONT,
         STAFF_KIND_STREAM,
     )
 
-    week_start = _parse_week_start(week)
+    week_start = _parse_week_start(week if isinstance(week, str) else None)
+    view_mode = schedule_view.normalize_view(view)
+    today = _portal_today()
+    # include_financials=False: pay rates were loaded for the manager labor
+    # total and never shown here.
     storefront_ctx = _grid_context(
-        session, week_start, staff_kind=SCHEDULE_CALENDAR_STOREFRONT
+        session,
+        week_start,
+        staff_kind=SCHEDULE_CALENDAR_STOREFRONT,
+        include_financials=False,
     )
     packing_ctx = _grid_context(
-        session, week_start, staff_kind=SCHEDULE_CALENDAR_PACKING
+        session,
+        week_start,
+        staff_kind=SCHEDULE_CALENDAR_PACKING,
+        include_financials=False,
     )
-    stream_ctx = _grid_context(
-        session, week_start, staff_kind=STAFF_KIND_STREAM
+    stream_ctx = _grid_context(session, week_start, staff_kind=STAFF_KIND_STREAM)
+
+    names: dict[int, str] = {}
+    for ctx in (storefront_ctx, packing_ctx, stream_ctx):
+        for person in ctx["users"]:
+            if person.id is not None:
+                names[person.id] = person.display_name or person.username
+    names.setdefault(user.id, user.display_name or user.username)
+
+    def _visible(entry_map: dict) -> dict:
+        # The grid only drew rows for non-terminated users; keep that contract.
+        return {key: rows for key, rows in entry_map.items() if key[0] in names}
+
+    stream_entries = dict(stream_ctx["stream_hint_map"])
+    if not any(person.id == user.id for person in stream_ctx["users"]):
+        # The Stream grid auto-rosters Stream-role staff only. Someone on
+        # another team who is linked to a Streamer still has stream shifts;
+        # show them in their own list (and in /team/hours) too.
+        from .team_admin_schedule import _stream_schedule_hint_map
+
+        own_hints, _legend = _stream_schedule_hint_map(
+            session, stream_ctx["week_days"], {user.id}
+        )
+        stream_entries.update(own_hints)
+
+    calendars = [
+        {"kind": schedule_view.LOCATION_STOREFRONT, "label": "Storefront",
+         "entries": _visible(storefront_ctx["entry_map"])},
+        {"kind": schedule_view.LOCATION_PACKING, "label": "Packing",
+         "entries": _visible(packing_ctx["entry_map"])},
+        {"kind": schedule_view.LOCATION_STREAM, "label": "Stream",
+         "entries": _visible(stream_entries)},
+    ]
+    week_days = storefront_ctx["week_days"]
+    day_notes = {
+        iso: (note.location_label or "").strip()
+        for iso, note in storefront_ctx["day_note_map"].items()
+        if (note.location_label or "").strip()
+    }
+    my_week = schedule_view.build_my_week(
+        week_days=week_days,
+        today=today,
+        me_id=user.id,
+        calendars=calendars,
+        names=names,
+        timeoff_days=_approved_timeoff_days(
+            session, user.id, week_days[0], week_days[-1]
+        ),
+        day_notes=day_notes,
     )
+    team_days = (
+        schedule_view.build_team_week(
+            week_days=week_days,
+            today=today,
+            me_id=user.id,
+            calendars=calendars,
+            names=names,
+            day_notes=day_notes,
+        )
+        if view_mode == schedule_view.VIEW_TEAM
+        else []
+    )
+
+    nav_ctx = _nav_context(session, user)
+    can_timeoff = any(item["name"] == "time-off" for item in nav_ctx["nav_items"])
+    timeoff_href = ""
+    if can_timeoff:
+        timeoff_href = "/team/requests?new=timeoff"
+        next_work = my_week["next_work_date"]
+        if next_work is not None:
+            timeoff_href += f"&date={next_work.isoformat()}"
+
     return templates.TemplateResponse(
         request,
         "team/schedule.html",
@@ -2550,56 +2697,35 @@ def team_schedule(
             "active": "schedule",
             "current_user": user,
             "csrf_token": issue_token(request),
-            "build_cell_key": _build_cell_key,
-            "build_day_loc_key": _build_day_loc_key,
-            "storefront": storefront_ctx,
-            "packing": packing_ctx,
-            "stream": stream_ctx,
-            "week_start": storefront_ctx["week_start"],
-            "week_days": storefront_ctx["week_days"],
-            "day_note_map": storefront_ctx["day_note_map"],
+            "view": view_mode,
+            "my_week": my_week,
+            "my_eyebrow": schedule_view.my_week_eyebrow(my_week),
+            "team_days": team_days,
+            "week_start": week_start,
+            "week_label": schedule_view.week_label(week_start),
             "prev_week": storefront_ctx["prev_week"],
             "next_week": storefront_ctx["next_week"],
             "this_week": storefront_ctx["this_week"],
             "is_current_week": storefront_ctx["is_current_week"],
-            "today": _portal_today(),
-            **_nav_context(session, user),
+            "timeoff_href": timeoff_href,
+            "today": today,
+            **nav_ctx,
         },
     )
 
 
-@router.get("/team/supply", response_class=HTMLResponse)
+@router.get("/team/supply")
 def team_supply(
-    request: Request,
     flash: Optional[str] = Query(default=None),
     error: Optional[str] = Query(default=None),
-    session: Session = Depends(get_session),
 ):
-    denial, user = _require_employee(
-        request, session, resource_key="page.supply_requests"
-    )
-    if denial:
-        return denial
-    rows = session.exec(
-        select(SupplyRequest)
-        .where(SupplyRequest.submitted_by_user_id == user.id)
-        .order_by(SupplyRequest.created_at.desc())
-    ).all()
-    return templates.TemplateResponse(
-        request,
-        "team/supply.html",
-        {
-            "request": request,
-            "title": "Supply Requests",
-            "active": "supply",
-            "current_user": user,
-            "requests": list(rows),
-            "flash": flash,
-            "error": error,
-            "csrf_token": issue_token(request),
-            **_nav_context(session, user),
-        },
-    )
+    """Old page URL: opens the supply form on /team/requests (redesign Phase 3)."""
+    params = {"new": "supply"}
+    if flash:
+        params["flash"] = flash
+    if error:
+        params["error"] = error
+    return RedirectResponse(f"/team/requests?{urlencode(params)}", status_code=303)
 
 
 @router.post("/team/supply", dependencies=[Depends(require_csrf)])
@@ -2625,7 +2751,7 @@ async def team_supply_post(
     clean_title = (title or "").strip()
     if not clean_title:
         return RedirectResponse(
-            "/team/supply?error=Title+is+required.", status_code=303
+            "/team/requests?new=supply&error=Title+is+required.", status_code=303
         )
     if urgency not in ("low", "normal", "high"):
         urgency = "normal"
@@ -2663,4 +2789,6 @@ async def team_supply_post(
         description=row.description,
         urgency=row.urgency,
     )
-    return RedirectResponse("/team/supply?flash=Request+submitted.", status_code=303)
+    return RedirectResponse(
+        "/team/requests?flash=Supply+request+submitted.", status_code=303
+    )

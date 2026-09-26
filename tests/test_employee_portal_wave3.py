@@ -219,7 +219,9 @@ class AuthGatingTests(unittest.TestCase, _PortalHarness):
         self._login_as("employee", user_id=30, username="e_t")
         r = self.client.get("/team/")
         self.assertEqual(r.status_code, 200)
-        self.assertIn("Dashboard", r.text)
+        # Page is titled "Home" since the 2026-09 redesign (was "Dashboard").
+        self.assertIn("<title>Home · Degen Team</title>", r.text)
+        self.assertIn("Needs you", r.text)
 
     def test_portal_disabled_returns_404(self):
         self._teardown_portal()
@@ -456,8 +458,9 @@ class InviteAcceptTests(unittest.TestCase, _PortalHarness):
         self.assertIn("Employee portal tour", r.text)
         self.assertIn("employee-dashboard-tour.png", r.text)
         self.assertIn("Step 1 of 7", r.text)
-        self.assertIn("The left menu gets you everywhere.", r.text)
-        self.assertIn("Hours is for time and pay.", r.text)
+        # Tour copy updated for the 2026-09 nav (five tabs, Clockify hours).
+        self.assertIn("Five tabs get you everywhere.", r.text)
+        self.assertIn("Hours come from Clockify.", r.text)
         self.assertIn("Skip tutorial", r.text)
 
     def test_manager_invite_accept_page_includes_manager_portal_tour(self):
@@ -812,10 +815,10 @@ class SupplyAndPoliciesTests(unittest.TestCase, _PortalHarness):
         self.assertEqual(page.status_code, 200)
         self.assertIn("Employee portal tour", page.text)
         self.assertIn("employee-dashboard-tour.png", page.text)
-        self.assertIn("The left menu gets you everywhere.", page.text)
-        self.assertIn("Start with today's shift.", page.text)
-        self.assertIn("Hours is for time and pay.", page.text)
-        self.assertIn("Catch updates and upcoming shifts.", page.text)
+        self.assertIn("Five tabs get you everywhere.", page.text)
+        self.assertIn("Start with the status card.", page.text)
+        self.assertIn("Hours come from Clockify.", page.text)
+        self.assertIn("See your week and your requests.", page.text)
         self.assertIn("Ask for help", page.text)
         self.assertIn("/team/hours", page.text)
 

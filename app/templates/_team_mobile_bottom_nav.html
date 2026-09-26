@@ -1,93 +1,76 @@
 {# ========================================================================
    Shared mobile bottom nav — visible only on <=860px (CSS in portal.css).
-   Included by team/base.html and team/admin/base.html so admins get the
-   same thumb-reach nav on phones.
+   Included by team/base.html and team/admin/base.html.
 
-   Five slots: Home · Stream · Eye (FAB) · Schedule · Profile.
-   Secondary employee destinations such as Time off stay in the hamburger
-   drawer to keep the thumb nav stable.
-   Graceful defaults via the `|default(...)` filter so pages that don't
-   run `_nav_context()` still render a usable nav.
+   Same five tabs for every role (employee portal redesign, 2026-09):
+     Home · Schedule · Hours · Requests · More
+   Ops tools live under More (shown by role), not in the bar.
+
+   A tab is hidden — never a 403 — when the user lacks its page.* key.
+   Visibility comes from `nav_items` (already permission-filtered by
+   `_nav_context()`). Pages that don't run `_nav_context()` (team admin)
+   leave `nav_items` undefined, and every tab renders; the admin base
+   points Schedule at the editable admin grid via `schedule_href`.
+
+   Active tab: the four main tabs match their own paths. More is the
+   catch-all -- every other page is reached from More (Inbox, Policies,
+   Profile, Help, password, ops tools, team admin), so it is active there.
+   Deriving it from "none of the four" instead of a list of paths or
+   `active` keys means a new More page can't be left with no tab lit.
    ===================================================================== #}
-{% set _tools = tools_nav_items|default([]) %}
-{% set _tool_flags = namespace(stream=false, eye=false) %}
-{% for item in _tools %}
-    {% if item.name == "live-stream" %}{% set _tool_flags.stream = true %}{% endif %}
-    {% if item.name == "degen-eye" %}{% set _tool_flags.eye = true %}{% endif %}
-{% endfor %}
-{% set _has_primary_tools = current_user and _tool_flags.stream and _tool_flags.eye %}
+{% from "team/_icons.html" import icon %}
 {% set _path = request.url.path %}
 {% set _sched_href = schedule_href|default('/team/schedule') %}
+{% if nav_items is defined %}
+  {% set _names = nav_items|map(attribute='name')|list %}
+{% else %}
+  {% set _names = ['dashboard', 'schedule', 'hours', 'time-off', 'supply'] %}
+{% endif %}
+{% set _show_requests = 'time-off' in _names or 'supply' in _names %}
+{% set _home_on = _path == '/team/' or _path == '/team' %}
+{% set _sched_on = _path.startswith('/team/schedule') or _path.startswith('/team/admin/schedule') %}
+{% set _hours_on = _path.startswith('/team/hours') %}
+{% set _requests_on = _path.startswith('/team/requests') or _path.startswith('/team/timeoff') or _path.startswith('/team/supply') %}
+{% set _more_on = not (_home_on or _sched_on or _hours_on or _requests_on) %}
 <nav class="pt-mobile-bottom-nav" id="pt-mobile-bottom-nav" aria-label="Primary">
+    {% if 'dashboard' in _names %}
     <a href="/team/"
-       class="pt-mbn-item{% if _path == '/team/' or _path == '/team' %} is-active{% endif %}"
+       class="pt-mbn-item{% if _home_on %} is-active{% endif %}"
        aria-label="Home">
-        <svg class="pt-mbn-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M3 11 12 3l9 8"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>
-        </svg>
+        {{ icon('home') }}
         <span class="pt-mbn-label">Home</span>
     </a>
-    {% if _has_primary_tools %}
-    <a href="/tiktok/streamer?team_shell=1"
-       class="pt-mbn-item{% if _path.startswith('/team/tools/live-stream') or _path.startswith('/tiktok/streamer') %} is-active{% endif %}"
-       aria-label="Live stream">
-        <svg class="pt-mbn-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="m22 8-6 4 6 4V8Z"/>
-            <rect x="2" y="6" width="14" height="12" rx="2" ry="2"/>
-        </svg>
-        <span class="pt-mbn-label">Stream</span>
-    </a>
-    <a href="/degen_eye?team_shell=1"
-       class="pt-mbn-item pt-mbn-item-center{% if _path.startswith('/team/tools/degen-eye') or _path.startswith('/degen_eye') or _path.startswith('/inventory/scan') %} is-active{% endif %}"
-       aria-label="Degen Eye">
-        <span class="pt-mbn-fab">
-            <svg class="pt-mbn-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-                <circle cx="12" cy="12" r="3"/>
-            </svg>
-        </span>
-        <span class="pt-mbn-label">Eye</span>
-    </a>
-    {% else %}
-    <a href="/team/policies"
-       class="pt-mbn-item{% if _path.startswith('/team/policies') %} is-active{% endif %}"
-       aria-label="Policies">
-        <svg class="pt-mbn-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-            <path d="M14 2v6h6"/>
-        </svg>
-        <span class="pt-mbn-label">Policies</span>
-    </a>
-    <a href="/team/supply"
-       class="pt-mbn-item pt-mbn-item-center{% if _path.startswith('/team/supply') %} is-active{% endif %}"
-       aria-label="Supply requests">
-        <span class="pt-mbn-fab">
-            <svg class="pt-mbn-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <line x1="12" y1="5" x2="12" y2="19"/>
-                <line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-        </span>
-        <span class="pt-mbn-label">Supply</span>
-    </a>
     {% endif %}
+    {% if 'schedule' in _names %}
     <a href="{{ _sched_href }}"
-       class="pt-mbn-item{% if _path.startswith('/team/schedule') or _path.startswith('/team/admin/schedule') %} is-active{% endif %}"
+       class="pt-mbn-item{% if _sched_on %} is-active{% endif %}"
        aria-label="Schedule">
-        <svg class="pt-mbn-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
-            <line x1="16" y1="2" x2="16" y2="6"/>
-            <line x1="8" y1="2" x2="8" y2="6"/>
-            <line x1="3" y1="10" x2="21" y2="10"/>
-        </svg>
+        {{ icon('calendar') }}
         <span class="pt-mbn-label">Schedule</span>
     </a>
-    <a href="/team/profile"
-       class="pt-mbn-item{% if _path.startswith('/team/profile') %} is-active{% endif %}"
-       aria-label="Profile">
-        <svg class="pt-mbn-icon" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-            <circle cx="12" cy="7" r="4"/>
-        </svg>
-        <span class="pt-mbn-label">Profile</span>
+    {% endif %}
+    {% if 'hours' in _names %}
+    <a href="/team/hours"
+       class="pt-mbn-item{% if _hours_on %} is-active{% endif %}"
+       aria-label="Hours">
+        {{ icon('clock') }}
+        <span class="pt-mbn-label">Hours</span>
+    </a>
+    {% endif %}
+    {% if _show_requests %}
+    <a href="/team/requests"
+       class="pt-mbn-item{% if _requests_on %} is-active{% endif %}"
+       aria-label="Requests">
+        {{ icon('requests') }}
+        <span class="pt-mbn-label">Requests</span>
+    </a>
+    {% endif %}
+    {% set _unread = inbox_unread|default(0) %}
+    <a href="/team/more"
+       class="pt-mbn-item{% if _more_on %} is-active{% endif %}"
+       aria-label="More{% if _unread %}, {{ _unread }} unread{% endif %}">
+        {{ icon('more') }}
+        {% if _unread %}<span class="pt-mbn-badge" aria-hidden="true">{{ _unread if _unread < 100 else '99+' }}</span>{% endif %}
+        <span class="pt-mbn-label">More</span>
     </a>
 </nav>

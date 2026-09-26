@@ -28,13 +28,13 @@
       <strong>Profile or phone number</strong>
       <span>Update your contact info and emergency contact.</span>
     </a>
-    <a class="pt-help-tile" href="/team/supply">
+    <a class="pt-help-tile" href="/team/requests?new=supply">
       <strong>Need supplies</strong>
       <span>Ask for cards, sleeves, labels, or anything we're out of.</span>
     </a>
     <a class="pt-help-tile" href="/team/help/tutorial">
       <strong>{% if current_user and current_user.role == "manager" %}Manager{% else %}Employee{% endif %} portal tour</strong>
-      <span>Where to find shifts, hours, schedules, announcements, policies, profile, and help.</span>
+      <span>Where to find shifts, hours, requests, your inbox, policies, profile, and help.</span>
     </a>
     {% if current_user and current_user.role in ("admin", "manager", "reviewer") %}
     <a class="pt-help-tile" href="/team/admin/tutorial">
@@ -45,7 +45,7 @@
   </div>
 </div>
 
-<div class="pt-card pt-help-install">
+<div class="pt-card pt-help-install" id="install">
   <div class="pt-card-title">Install Degen on your phone</div>
   <div class="pt-card-sub">If the portal still opens in a browser, put it on your Home Screen so it acts like an app.</div>
   <div class="onb-ios-card" aria-label="Phone Add to Home Screen instructions">

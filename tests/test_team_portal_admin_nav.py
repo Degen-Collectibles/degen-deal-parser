@@ -74,12 +74,21 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
 
     def _dashboard_html(self) -> str:
         from app import permissions as perms
-        from app.routers.team import _nav_context
+        from app.routers.team import _employee_home_context, _nav_context
         from app.shared import templates
 
         user = self._current_user
         request = SimpleNamespace(url=SimpleNamespace(path="/team/"))
+        nav_ctx = _nav_context(self.session, user)
+        home_ctx = _employee_home_context(
+            self.session,
+            user,
+            today=date(2026, 9, 23),
+            now_local=datetime(2026, 9, 23, 12, 0),
+            nav_ctx=nav_ctx,
+        )
         context = {
+            **home_ctx,
             "request": request,
             "title": "Dashboard",
             "active": "dashboard",
@@ -89,7 +98,7 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
             "supply_queue_count": 0,
             "now_hour": 12,
             "csrf_token": "test-token",
-            **_nav_context(self.session, user),
+            **nav_ctx,
         }
         return templates.env.get_template("team/dashboard.html").render(context)
 
@@ -156,7 +165,7 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
     def test_admin_sees_all_privileged_sidebar_links(self):
         self._current_user = self._login_as("admin", user_id=101, username="adm")
         html = self._dashboard_html()
-        self.assertIn("What do I need to do today?", html)
+        self.assertIn("Needs you", html)  # Home (redesign) rendered
         self.assertIn('href="/team/admin/schedule"', html)
         self.assertIn('href="/team/admin/employees"', html)
         self.assertIn('href="/team/admin/invites"', html)
@@ -173,9 +182,9 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
     def test_employee_sees_no_admin_or_tools_links(self):
         self._current_user = self._login_as("employee", user_id=102, username="emp")
         html = self._dashboard_html()
-        self.assertIn("What do I need to do today?", html)
+        self.assertIn("Needs you", html)  # Home (redesign) rendered
         self.assertIn('href="/team/profile"', html)
-        self.assertIn('href="/team/supply"', html)
+        self.assertIn('href="/team/requests?tab=supply"', html)
         self.assertIn('href="/team/schedule"', html)
         self.assertNotIn('href="/team/admin/schedule"', html)
         self.assertNotIn('href="/team/admin/employees"', html)
@@ -240,11 +249,88 @@ class AdminSidebarVisibilityTests(unittest.TestCase):
         self.assertNotIn("isn't hooked up", html)
         self.assertNotIn("lands soon", html)
         upper = unescape(html).upper()
-        self.assertIn("HOURS THIS WEEK", upper)
-        self.assertIn("ESTIMATED PAY", upper)
-        self.assertIn("WHAT DO I NEED TO DO TODAY?", upper)
+        # Redesigned Home: hours tiles + "Needs you"; estimated pay is
+        # deliberately not on Home any more (PRD decision 2026-09-24).
+        self.assertIn("THIS WEEK", upper)
+        self.assertIn("LAST WEEK", upper)
+        self.assertIn("NEEDS YOU", upper)
+        self.assertNotIn("ESTIMATED PAY", upper)
         self.assertNotIn("Coming with payroll integration", html)
         self.assertNotIn("Task assignments pending", html)
+
+    def _grant(self, role: str, *keys: str) -> None:
+        from sqlmodel import select
+
+        from app.models import RolePermission
+
+        for key in keys:
+            row = self.session.exec(
+                select(RolePermission).where(
+                    RolePermission.role == role,
+                    RolePermission.resource_key == key,
+                )
+            ).first() or RolePermission(role=role, resource_key=key)
+            row.is_allowed = True
+            self.session.add(row)
+        self.session.commit()
+
+    _ADMIN_GATED_KEYS = (
+        "admin.permissions.view",
+        "admin.invites.view",
+        "admin.employees.reset_password",
+        "page.admin.invites",
+        "page.admin.permissions",
+    )
+
+    def test_admin_nav_hides_admin_gated_items_from_non_admin_manager(self):
+        # Even if the matrix grants a manager these keys, the routes use
+        # `_admin_gate` (role == "admin"), so the links would 403.
+        from app.routers.team_admin import _admin_gate, _build_team_admin_nav
+
+        self._grant("manager", *self._ADMIN_GATED_KEYS)
+        manager = self._login_as("manager", user_id=108, username="mgr2")
+        hrefs = {
+            item["href"]
+            for section in _build_team_admin_nav(self.session, manager)
+            for item in section["items"]
+        }
+        for href in (
+            "/team/admin/permissions",
+            "/team/admin/sms",
+            "/team/admin/password-reset-requests",
+            "/team/admin/invites",
+        ):
+            self.assertNotIn(href, hrefs)
+        self.assertIn("/team/admin/schedule", hrefs)
+
+        request = SimpleNamespace(state=SimpleNamespace(current_user=manager))
+        denial, _ = _admin_gate(request, self.session, "admin.invites.view")
+        self.assertEqual(denial.status_code, 403)
+
+        admin = self._login_as("admin", user_id=109, username="adm2")
+        admin_hrefs = {
+            item["href"]
+            for section in _build_team_admin_nav(self.session, admin)
+            for item in section["items"]
+        }
+        self.assertIn("/team/admin/invites", admin_hrefs)
+        self.assertIn("/team/admin/password-reset-requests", admin_hrefs)
+
+    def test_portal_sidebar_hides_admin_gated_links_from_granted_manager(self):
+        self._grant("manager", *self._ADMIN_GATED_KEYS)
+        self._current_user = self._login_as("manager", user_id=110, username="mgr3")
+        html = self._dashboard_html()
+        self.assertNotIn('href="/team/admin/invites"', html)
+        self.assertNotIn('href="/team/admin/permissions"', html)
+        self.assertIn('href="/team/admin/schedule"', html)
+
+    def test_portal_sidebar_hides_buylist_pricing_without_buylist_edit(self):
+        # /team/admin/buylist requires admin.buylist.edit (admin-only by
+        # default); admin.supply.view alone must not advertise it.
+        self._current_user = self._login_as("manager", user_id=111, username="mgr4")
+        html = self._dashboard_html()
+        self.assertIn('href="/team/admin/buylist/submissions"', html)
+        self.assertNotIn('href="/team/admin/buylist"', html)
 
     def test_viewer_cannot_enter_permission_gated_admin_page(self):
         from app.routers.team_admin import _permission_gate

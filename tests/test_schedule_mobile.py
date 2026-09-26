@@ -519,6 +519,37 @@ class ScheduleMobileTests(unittest.TestCase):
         finally:
             ctx.close()
 
+    def test_saving_dirty_grid_does_not_trigger_leave_site_prompt(self):
+        """Submitting the Save form with dirty cells is a deliberate post and
+        must not arm the beforeunload "Leave site?" warning."""
+        ctx, page = self._open_page(
+            viewport={"width": 1280, "height": 800},
+            has_touch=False,
+            is_mobile=False,
+        )
+        try:
+            result = page.evaluate(
+                """() => {
+                    const cell = document.querySelector('form[data-schgrid="storefront"] .sch-cell');
+                    cell.classList.add('is-dirty');
+                    const probe = () => {
+                        const ev = new Event('beforeunload', {cancelable: true});
+                        window.dispatchEvent(ev);
+                        return ev.defaultPrevented;
+                    };
+                    const before = probe();
+                    // Window-level bubbling listener runs after the page's
+                    // document-level submit handler; stop the real navigation.
+                    window.addEventListener('submit', e => e.preventDefault());
+                    document.querySelector('form[data-schgrid="storefront"]').requestSubmit();
+                    return {before: before, after: probe()};
+                }"""
+            )
+            self.assertTrue(result["before"], "dirty grid should warn on plain navigation")
+            self.assertFalse(result["after"], "Save submit must suppress the leave-site warning")
+        finally:
+            ctx.close()
+
     def test_desktop_click_still_opens_editor(self):
         """Regression guard: at 1280x800 with no touch, a mouse click on a
         cell must still open the editor — the mobile fixes can't break
@@ -786,15 +817,20 @@ class ScheduleMobileSummaryRenderTests(unittest.TestCase):
         self.assertIn("padding-bottom: calc(120px", html)
         self.assertIn("scrollbar-color: #ff8a3d", html)
 
-    def test_employee_schedule_template_moves_legend_above_first_grid(self):
+    def test_employee_schedule_template_is_a_list_not_a_wide_grid(self):
+        """The employee page no longer renders the 1000px grids (redesign
+        2026-09): My shifts / Whole team are lists that fit a phone, and the
+        bottom-nav clearance comes from the shared portal.css shell instead
+        of a page-level padding-bottom rule."""
         source = Path("app/templates/team/schedule.html").read_text(encoding="utf-8")
 
         self.assertLess(
-            source.index('<div class="sch-legend">'),
-            source.index("{{ render_grid(storefront"),
+            source.index('<nav class="pt-seg"'),
+            source.index('<ol class="pt-rows pt-myweek"'),
         )
-        self.assertIn("Swipe sideways to see all days and totals.", source)
-        self.assertIn("padding-bottom: calc(112px", source)
+        self.assertNotIn("render_grid", source)
+        self.assertNotIn("Swipe sideways", source)
+        self.assertNotIn("<style", source)
 
 
 if __name__ == "__main__":

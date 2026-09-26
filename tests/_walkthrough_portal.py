@@ -195,11 +195,8 @@ def main() -> int:
     check("dashboard 200s", r.status_code == 200, f"status={r.status_code}")
     page = r.text
     check("greets the employee by name", "Pete" in page)
-    check(
-        "time-aware greeting renders",
-        any(g in page for g in ("Good morning", "Good afternoon", "Good evening")),
-    )
-    check("hero card present", "pt-hero" in page)
+    check("Home greeting renders", "Hi, " in page)
+    check("status hero present", "pt-hero" in page)
     check("Tools group visible", '<div class="pt-side-group">Tools</div>' in page)
     check("NO Admin group for employee", '<div class="pt-side-group">Admin</div>' not in page)
     check("mobile topbar rendered", 'id="pt-mobile-topbar"' in page)

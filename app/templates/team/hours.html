@@ -1,218 +1,157 @@
 {% extends "team/base.html" %}
-{% block header_sub %}
-<div class="pt-h1-sub">Your paid Clockify time, week by week.</div>
+{#- Employee Hours (redesign Phase 2). Weekly framing: the app has no pay
+    periods, payroll runs on Mon–Sun ranges. View-model comes from
+    team_hours() in app/routers/team.py and build_hours_view() in
+    app/team/schedule_view.py. No estimated pay here, by decision. -#}
+{% from "team/_icons.html" import icon %}
+{% set hv = hours|default({}) %}
+
+{% block page_header %}
+<div class="pt-topline">
+  <div>
+    <div class="pt-eyebrow">Paid time from Clockify</div>
+    <h1 class="pt-title">Hours</h1>
+  </div>
+</div>
 {% endblock %}
+
 {% block content %}
+<div class="pt-page-narrow pt-hours">
 
 {% if not clockify_ready %}
-<div class="pt-card pt-hero" style="text-align:center; padding:48px 32px;">
-    <div style="font-size:42px; margin-bottom:14px;" aria-hidden="true">&#9201;</div>
-    <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Hours are being set up.</h2>
-    <p class="pt-card-sub" style="max-width:520px; margin:0 auto;">
-        If you worked this week and this still looks blank, tap Ask for help and your manager can check the connection.
-    </p>
-</div>
+  <div class="pt-rows pt-hours-state">
+    <div class="pt-row">
+      <span class="pt-ico is-info">{{ icon('clock') }}</span>
+      <span class="pt-row-body">
+        <span class="pt-row-title">Hours are being set up.</span>
+        <span class="pt-row-sub">If you worked this week and this still looks blank, <a class="pt-inline-link" href="/team/help?page=/team/hours">ask for help</a> and your manager can check the connection.</span>
+      </span>
+    </div>
+  </div>
 {% elif not clockify_user_id %}
-<div class="pt-card pt-hero" style="text-align:center; padding:48px 32px;">
-    <div style="font-size:42px; margin-bottom:14px;" aria-hidden="true">&#9201;</div>
-    <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Your hours are not linked yet.</h2>
-    <p class="pt-card-sub" style="max-width:520px; margin:0 auto;">
-        Ask a manager to connect your Clockify account so your hours and estimated pay show here.
-    </p>
-</div>
+  <div class="pt-rows pt-hours-state">
+    <div class="pt-row">
+      <span class="pt-ico is-info">{{ icon('clock') }}</span>
+      <span class="pt-row-body">
+        <span class="pt-row-title">Your hours are not linked yet.</span>
+        <span class="pt-row-sub">Ask a manager to connect your Clockify account so your hours show here.</span>
+      </span>
+    </div>
+  </div>
 {% elif clockify_error %}
-<div class="pt-card pt-hero" style="text-align:center; padding:48px 32px; border-color:rgba(239,68,68,0.35);">
-    <div style="font-size:42px; margin-bottom:14px;" aria-hidden="true">!</div>
-    <h2 class="pt-card-title" style="font-size:22px; margin-bottom:12px;">Your hours could not be loaded.</h2>
-    <p class="pt-card-sub" style="max-width:620px; margin:0 auto;">
-        This is usually temporary. If it keeps happening, tap Ask for help so a manager can check the Clockify connection.
-    </p>
-</div>
+  <div class="pt-rows pt-hours-state">
+    <div class="pt-row is-danger">
+      <span class="pt-ico is-err">{{ icon('info') }}</span>
+      <span class="pt-row-body">
+        <span class="pt-row-title">Your hours could not be loaded.</span>
+        <span class="pt-row-sub">This is usually temporary. If it keeps happening, <a class="pt-inline-link" href="/team/help?page=/team/hours">ask for help</a> so a manager can check the Clockify connection.</span>
+      </span>
+    </div>
+  </div>
 {% else %}
-<div class="pt-hours-nav">
-    <a class="pt-hours-navbtn" href="/team/hours?week={{ prev_week }}">&larr; Previous</a>
-    <a class="pt-hours-navbtn {% if is_this_week %}is-current{% endif %}" href="/team/hours?week={{ this_week }}">This week</a>
+  <nav class="pt-weeknav" aria-label="Week">
+    <a class="pt-btn" href="/team/hours?week={{ prev_week }}" aria-label="Previous week">{{ icon('back') }}</a>
+    <div class="pt-weeknav-lbl">
+      {{ week_label }}
+      {% if is_this_week %}<span class="pt-weeknav-sub">This week</span>
+      {% else %}<a class="pt-weeknav-sub" href="/team/hours?week={{ this_week }}">Back to this week</a>{% endif %}
+    </div>
     {% if can_go_forward %}
-    <a class="pt-hours-navbtn" href="/team/hours?week={{ next_week }}">Next &rarr;</a>
+    <a class="pt-btn" href="/team/hours?week={{ next_week }}" aria-label="Next week">{{ icon('chev') }}</a>
     {% else %}
-    <span class="pt-hours-navbtn is-disabled" aria-disabled="true">Next &rarr;</span>
+    <span class="pt-btn is-disabled" aria-disabled="true" aria-label="Next week">{{ icon('chev') }}</span>
     {% endif %}
-</div>
+  </nav>
 
-{% if week.needs_fix_days %}
-<div class="pt-hours-alert">
-    <strong>{{ week.needs_fix_days|length }} day(s) need a fix.</strong>
-    Your manager flagged these and they will not be paid until they are sorted out.
-    {% for day in week.needs_fix_days %}
-    <div class="pt-hours-alert-day">
-        {{ day.day.strftime('%a %b %d') }}{% if day.status_note %} &mdash; {{ day.status_note }}{% endif %}
+  {% if week.needs_fix_days %}
+  <div class="pt-callout is-err pt-hours-fix" role="alert">
+    {{ icon('info') }}
+    <div>
+      <b>{{ week.needs_fix_days|length }} day(s) need a fix.</b>
+      Your manager flagged these and they will not be paid until they are sorted out.
+      {% for day in week.needs_fix_days %}
+      <span class="pt-callout-line">{{ day.day.strftime('%a %b %d') }}{% if day.status_note %} · {{ day.status_note }}{% endif %}</span>
+      {% endfor %}
     </div>
-    {% endfor %}
-    <div style="margin-top:8px;">Tap Ask for help if you are not sure what to do.</div>
-</div>
+  </div>
+  {% endif %}
+
+  <section class="pt-kit-card pt-hours-card" aria-label="Worked vs scheduled">
+    <div class="pt-eyebrow">{% if is_this_week %}Paid hours this week{% else %}Paid hours{% endif %}</div>
+    <div class="pt-stat">
+      <span class="pt-stat-v">{{ hv.total_label|default('0') }}h</span>
+      <span class="pt-stat-s">{% if hv.scheduled_label %}of {{ hv.scheduled_label }}h scheduled{% else %}nothing scheduled{% endif %}</span>
+    </div>
+    <ol class="pt-bars" aria-label="Hours by day">
+      {% for bar in hv.bars|default([]) %}
+      <li class="pt-bar{% if bar.is_today %} is-today{% endif %}" aria-label="{{ bar.weekday }}: {{ bar.worked_label }}h worked{% if bar.has_sched %} of {{ bar.sched_label }}h scheduled{% endif %}">
+        <span class="pt-bar-track" aria-hidden="true">
+          {% if bar.has_sched %}<span class="pt-bar-sched pt-bar-h-{{ bar.sched_bucket }}"></span>{% endif %}
+          {% if bar.worked_bucket %}<span class="pt-bar-act pt-bar-h-{{ bar.worked_bucket }}"></span>{% endif %}
+        </span>
+        <span class="pt-bar-lb" aria-hidden="true">{{ bar.letter }}</span>
+      </li>
+      {% endfor %}
+    </ol>
+    <div class="pt-legend" aria-hidden="true">
+      <span><i class="pt-swatch is-worked"></i>Worked</span>
+      <span><i class="pt-swatch is-sched"></i>Scheduled</span>
+    </div>
+  </section>
+
+  <div class="pt-tiles">
+    <div class="pt-tile">
+      <div class="pt-tile-k">Days worked</div>
+      <div class="pt-tile-v">{{ hv.days_worked|default(0) }}{% if hv.days_scheduled %}<small> / {{ hv.days_scheduled }}</small>{% endif %}</div>
+      <div class="pt-tile-s">{% if hv.days_scheduled %}of scheduled days{% else %}this week{% endif %}</div>
+    </div>
+    <div class="pt-tile">
+      <div class="pt-tile-k">Breaks</div>
+      <div class="pt-tile-v">{{ hv.break_label|default('0') }}<small>h</small></div>
+      <div class="pt-tile-s">unpaid{% if hv.auto_break_label %} · {{ hv.auto_break_label }} auto{% endif %}</div>
+    </div>
+  </div>
+
+  <section class="pt-section" aria-labelledby="pt-hours-days-h">
+    <div class="pt-section-h"><h2 id="pt-hours-days-h">Days</h2></div>
+    <ul class="pt-rows pt-hours-days">
+      {% for row in hv.rows|default([]) %}
+      <li class="pt-row pt-hours-day{% if row.is_today %} is-today{% endif %}" data-date="{{ row.date.isoformat() }}">
+        <span class="pt-row-body">
+          <span class="pt-row-title">{{ row.heading }}
+            {% if row.running %}<span class="pt-pill ok">Clocked in</span>{% endif %}
+            {% if row.status_label %}<span class="pt-pill {{ row.status_tone }}">{{ row.status_label }}</span>{% endif %}
+          </span>
+          {% for line in row.lines %}
+          <span class="pt-row-sub{% if line.is_break %} is-break{% endif %}">{{ line.text }}</span>
+          {% else %}
+          <span class="pt-row-sub">No hours logged</span>
+          {% endfor %}
+          {% for flag in row.flags %}
+          <span class="pt-flag is-{{ flag.tone }}">{{ flag.text }}</span>
+          {% endfor %}
+        </span>
+        <span class="pt-row-num">
+          {{ row.worked_label }}h
+          {% if row.sched_label %}<span class="pt-row-num-sub">of {{ row.sched_label }}h</span>{% endif %}
+        </span>
+      </li>
+      {% else %}
+      {#- Past weeks read the Clockify cache only (no live call), so an empty
+          past week is genuinely empty; a failed live fetch for this week shows
+          the "could not be loaded" state above instead. -#}
+      <li class="pt-empty">{% if is_this_week %}No time entries this week yet.{% else %}No hours logged that week.{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </section>
 {% endif %}
 
-<div class="pt-widget-grid">
-    <div class="pt-widget">
-        <div class="pt-widget-label">{% if is_this_week %}Paid hours this week{% else %}Paid hours{% endif %}</div>
-        <div class="pt-widget-value">{{ format_hours(week.total_work_seconds) }}</div>
-        <div class="pt-widget-sub">
-            {{ week.week_start.strftime('%b %d') }} - {{ week.week_end_inclusive.strftime('%b %d') }}
-        </div>
+  <div class="pt-section">
+    <div class="pt-callout pt-hours-explainer">
+      {{ icon('info') }}
+      <div>You clock in and out in <b>Clockify</b> on the shop iPad. Hours show up here within a few minutes. Paid hours don't include breaks.</div>
     </div>
-    {% if is_this_week and pay.estimated_pay_label %}
-    <div class="pt-widget">
-        <div class="pt-widget-label">Estimated pay</div>
-        <div class="pt-widget-value">{{ pay.estimated_pay_label }}</div>
-        <div class="pt-widget-sub">{{ pay.pay_basis }}</div>
-    </div>
-    {% endif %}
-    <div class="pt-widget">
-        <div class="pt-widget-label">Clockify status</div>
-        <div class="pt-widget-value" style="font-size:18px; font-weight:650;">
-            {% if week.running_count %}Timer running{% else %}No running timer{% endif %}
-        </div>
-        <div class="pt-widget-sub">{{ week.timezone_name }}</div>
-    </div>
+  </div>
+
 </div>
-
-{#
-   Breaks and the automatic missed-break deduction are subtracted from paid
-   time. This page used to show the raw Clockify total, which was higher than
-   both the dashboard and the amount actually paid, with nothing explaining
-   the gap.
-#}
-{% if week.total_break_seconds or week.total_auto_break_seconds %}
-<div class="pt-card" style="margin-top:20px;">
-    <div class="pt-card-title">Breaks this week</div>
-    <p class="pt-card-sub" style="margin-top:6px;">
-        {{ format_hours(week.total_break_seconds) }} of break time is not counted as paid hours.
-        {% if week.total_auto_break_seconds %}
-        That includes {{ format_hours(week.total_auto_break_seconds) }} deducted automatically on
-        days over 5 hours where no break was clocked. If that looks wrong, tap Ask for help.
-        {% endif %}
-    </p>
-</div>
-{% endif %}
-
-<div class="pt-card" style="margin-top:20px;">
-    <div style="display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:12px;">
-        <div class="pt-card-title">Daily totals</div>
-        <a class="pt-link" href="https://app.clockify.me/tracker" target="_blank" rel="noreferrer" style="font-size:13px;">Open Clockify</a>
-    </div>
-    <div class="pt-hours-days">
-        {% for day in week.days %}
-        <div class="pt-hours-day {% if day.is_today %}is-today{% endif %}">
-            <div class="pt-hours-day-wd">{{ day.day.strftime('%a') }}</div>
-            <div class="pt-hours-day-val">{{ format_hours(day.work_seconds) }}</div>
-            <div class="pt-hours-day-date">{{ day.day.strftime('%b %d') }}</div>
-            {% if day.auto_break_seconds %}
-            <div class="pt-hours-day-note">-{{ format_hours(day.auto_break_seconds) }} break</div>
-            {% elif day.break_seconds %}
-            <div class="pt-hours-day-note">{{ format_hours(day.break_seconds) }} break</div>
-            {% endif %}
-            {% if day.status_label %}
-            <div class="pt-hours-day-status tone-{{ day.status_tone }}">{{ day.status_label }}</div>
-            {% endif %}
-        </div>
-        {% endfor %}
-    </div>
-</div>
-
-<div class="pt-card" style="margin-top:20px;">
-    <div class="pt-card-title">Entries</div>
-    {% if week.entries %}
-        <div style="display:grid; gap:0; margin-top:12px;">
-            {% for entry in week.entries %}
-            <div style="display:grid; grid-template-columns:minmax(140px, 1fr) 110px; gap:16px; padding:12px 0; border-top:{% if not loop.first %}1px solid var(--pt-border){% else %}0{% endif %};">
-                <div>
-                    <div style="font-weight:700;">{{ entry.description }}</div>
-                    <div class="pt-card-sub" style="margin-top:3px;">
-                        {% if entry.start_local %}
-                            {{ entry.start_local.strftime('%a %b %d, %I:%M %p') }}
-                            {% if entry.end_local and not entry.running %}- {{ entry.end_local.strftime('%I:%M %p') }}{% endif %}
-                            {% if entry.running %}- running{% endif %}
-                        {% else %}
-                            Time entry
-                        {% endif %}
-                    </div>
-                </div>
-                <div style="text-align:right; font-weight:750;">{{ format_hours(entry.duration_seconds) }}</div>
-            </div>
-            {% endfor %}
-        </div>
-        <p class="pt-card-sub" style="margin-top:12px; font-size:11.5px;">
-            Entry times are exactly as recorded in Clockify. Paid hours above exclude breaks.
-        </p>
-    {% else %}
-        <div class="pt-card-sub" style="margin-top:8px;">No time entries this week yet.</div>
-    {% endif %}
-</div>
-{% endif %}
-
-<style>
-    /* Seven fixed columns needed ~700px and scrolled sideways on a phone,
-       which is the device employees actually check this on. */
-    .pt-hours-days {
-        display: grid;
-        grid-template-columns: repeat(7, minmax(0, 1fr));
-        gap: 8px;
-    }
-    .pt-hours-day {
-        padding: 12px 8px;
-        border: 1px solid var(--pt-border);
-        border-radius: 8px;
-        background: var(--pt-surface-raised);
-        min-width: 0;
-    }
-    .pt-hours-day.is-today { border-color: rgba(59,130,246,0.55); }
-    .pt-hours-day-wd { font-size: 12px; color: var(--pt-muted); font-weight: 600; }
-    .pt-hours-day-val { font-size: 18px; font-weight: 750; margin-top: 4px; }
-    .pt-hours-day-date { font-size: 11px; color: var(--pt-muted); margin-top: 2px; }
-    .pt-hours-day-note { font-size: 10.5px; color: #fcd34d; margin-top: 4px; }
-    .pt-hours-day-status {
-        font-size: 9.5px;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        margin-top: 5px;
-        line-height: 1.25;
-    }
-    .pt-hours-day-status.tone-ok { color: #86efac; }
-    .pt-hours-day-status.tone-danger { color: #fca5a5; }
-    .pt-hours-day-status.tone-info { color: #93c5fd; }
-    .pt-hours-day-status.tone-muted { color: var(--pt-muted); }
-
-    .pt-hours-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
-    .pt-hours-navbtn {
-        padding: 8px 14px;
-        border: 1px solid var(--pt-border);
-        border-radius: 8px;
-        background: var(--pt-surface-raised);
-        color: var(--pt-text);
-        font-size: 13px;
-        font-weight: 600;
-        text-decoration: none;
-    }
-    .pt-hours-navbtn.is-current { border-color: rgba(59,130,246,0.55); color: #93c5fd; }
-    .pt-hours-navbtn.is-disabled { opacity: 0.4; cursor: not-allowed; }
-
-    .pt-hours-alert {
-        border: 1px solid rgba(239,68,68,0.4);
-        background: rgba(239,68,68,0.08);
-        border-radius: 10px;
-        padding: 14px 16px;
-        margin-bottom: 16px;
-        font-size: 13px;
-        line-height: 1.5;
-    }
-    .pt-hours-alert-day { margin-top: 6px; color: var(--pt-muted); font-size: 12.5px; }
-    @media (max-width: 720px) {
-        .pt-hours-days { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-    }
-    @media (max-width: 420px) {
-        .pt-hours-days { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-        .pt-hours-day-val { font-size: 16px; }
-    }
-</style>
 {% endblock %}

@@ -75,7 +75,8 @@
                 <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br); text-transform:capitalize;">{{ status }}</td>
                 <td style="padding:12px 14px; border-bottom:1px solid var(--lx-br); white-space:nowrap;">
                     {% if can_create and ann.is_active %}
-                        <form method="post" action="/team/admin/announcements/{{ ann.id }}/archive" style="display:inline;">
+                        <form method="post" action="/team/admin/announcements/{{ ann.id }}/archive" style="display:inline;"
+                              onsubmit="return confirm('Archive this announcement? It will be hidden from the team.');">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
                             <button class="ta-btn danger" type="submit">Archive</button>
                         </form>

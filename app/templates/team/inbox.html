@@ -1,0 +1,101 @@
+{% extends "team/base.html" %}
+{#- Employee Inbox (redesign Phase 4): announcements, updates and documents in
+    one list with read/unread. View-model: app/team/inbox.py (build_inbox),
+    route: app/routers/team_inbox.py.
+
+    Opening an announcement or update is a real form POST to
+    /team/inbox/open (marks it read, then redirects to it), so the page works
+    without JavaScript. Documents open in a new tab as plain links;
+    /static/portal-inbox.js marks those read in the background and drives
+    the "Browser alerts" row. -#}
+{% from "team/_icons.html" import icon %}
+
+{%- macro row_body(item) -%}
+<span class="pt-inbox-dot">{% if item.unread %}<span class="pt-dot-unread"></span><span class="pt-sr">Unread: </span>{% endif %}</span>
+<span class="pt-ico is-{{ item.tone or 'plain' }}">{{ icon(item.icon) }}</span>
+<span class="pt-row-body">
+  <span class="pt-inbox-top">
+    <span class="pt-row-title">{{ item.title }}</span>
+    {% if item.when_label %}<time class="pt-inbox-when"{% if item.when %} datetime="{{ item.when.isoformat() }}"{% endif %}>{{ item.when_label }}</time>{% endif %}
+  </span>
+  {% if item.snippet %}<span class="pt-row-sub pt-inbox-snippet">{{ item.snippet }}</span>{% endif %}
+  <span class="pt-inbox-meta">{{ item.kind_label }}{% if item.meta %} · {{ item.meta }}{% endif %}</span>
+</span>
+{%- endmacro -%}
+
+{% block page_header %}
+<div class="pt-topline">
+  <div>
+    <div class="pt-eyebrow" data-inbox-eyebrow>{% if inbox.unread_total %}{{ inbox.unread_total }} unread{% else %}All caught up{% endif %}</div>
+    <h1 class="pt-title">Inbox</h1>
+  </div>
+  {% if inbox.unread[inbox.filter] %}
+  <form method="post" action="/team/inbox/read-all" class="pt-inbox-readall">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="filter" value="{{ inbox.filter }}">
+    <button class="pt-btn sm" type="submit">Mark all read</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="pt-page-narrow pt-inbox" data-inbox data-read-url="/team/inbox/read" data-csrf="{{ csrf_token }}">
+
+  {% if inbox.tabs %}
+  <nav class="pt-seg pt-seg-4" aria-label="Filter inbox">
+    {% for tab in inbox.tabs %}
+      <a href="{{ tab.href }}"{% if tab.current %} aria-current="page"{% endif %}><span class="pt-seg-long">{{ tab.label }}</span><span class="pt-seg-short">{{ tab.short }}</span></a>
+    {% endfor %}
+  </nav>
+  {% endif %}
+
+  <div class="pt-rows pt-inbox-list">
+    {% for item in inbox.rows %}
+      {% if item.external %}
+        <a class="pt-row pt-inbox-row{% if item.unread %} is-unread{% endif %}" id="inbox-{{ item.uid }}" href="{{ item.href }}" target="_blank" rel="noopener"
+           data-inbox-kind="{{ item.kind }}" data-inbox-key="{{ item.key }}"{% if item.unread %} data-inbox-unread{% endif %}>
+          {{ row_body(item) }}
+        </a>
+      {% else %}
+        <form method="post" action="/team/inbox/open" id="inbox-{{ item.uid }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="kind" value="{{ item.kind }}">
+          <input type="hidden" name="key" value="{{ item.key }}">
+          <button type="submit" class="pt-row pt-inbox-row{% if item.unread %} is-unread{% endif %}">
+            {{ row_body(item) }}
+          </button>
+        </form>
+      {% endif %}
+    {% else %}
+      <div class="pt-empty">{{ inbox.empty_text }}</div>
+    {% endfor %}
+  </div>
+
+  {% if show_alerts %}
+  <section class="pt-section" id="alerts" aria-labelledby="pt-alerts-h">
+    <div class="pt-section-h"><h2 id="pt-alerts-h">Alerts &amp; texts</h2></div>
+    <div class="pt-rows">
+      <a class="pt-row" href="/team/profile#sms-preferences">
+        <span class="pt-ico">{{ icon('phone') }}</span>
+        <span class="pt-row-body">
+          <span class="pt-row-title">Optional SMS subscription</span>
+          <span class="pt-row-sub">Texts are sent only after you opt in on your profile.</span>
+        </span>
+        <span class="pt-pill {{ 'ok' if sms_enabled else 'neutral' }}" data-sms-status>{{ 'On' if sms_enabled else 'Off' }}</span>
+      </a>
+      <div class="pt-row" data-push-row>
+        <span class="pt-ico">{{ icon('bell') }}</span>
+        <span class="pt-row-body">
+          <span class="pt-row-title">Browser alerts</span>
+          <span class="pt-row-sub" data-push-status>Pop-up alerts on this device while the portal is open.</span>
+        </span>
+        <button class="pt-btn sm" type="button" data-push-enable hidden>Turn on</button>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+</div>
+<script src="/static/portal-inbox.js?v=2026092502" defer></script>
+{% endblock %}

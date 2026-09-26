@@ -290,19 +290,23 @@ class EmployeeHoursPageTests(unittest.TestCase):
         html = self._render()
 
         self.assertIn("Paid hours this week", html)
-        self.assertIn("7h 30m", html)
+        # 8h raw minus the 30m missed-break deduction.
+        self.assertIn('<span class="pt-stat-v">7.5h</span>', html)
+        self.assertNotIn('<span class="pt-stat-v">8h</span>', html)
 
     def test_page_explains_the_automatic_deduction(self):
         html = self._render()
 
-        self.assertIn("Breaks this week", html)
+        self.assertIn("No break logged on a day over 5 hours", html)
         self.assertIn("deducted automatically", html)
+        self.assertIn("30m auto", html)
 
-    def test_page_shows_estimated_pay_it_promises(self):
-        """The unlinked empty state advertises estimated pay; deliver it."""
+    def test_page_shows_no_estimated_pay(self):
+        """Estimated pay was removed from Hours (redesign decision 2026-09);
+        neither the page nor its empty states may promise it."""
         html = self._render()
 
-        self.assertIn("Estimated pay", html)
+        self.assertNotIn("estimated pay", html.lower())
 
     def test_page_does_not_leak_raw_api_errors(self):
         from app.routers import team as mod
