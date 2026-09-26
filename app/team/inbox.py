@@ -45,12 +45,6 @@ FILTER_LABELS = (
     (FILTER_DOCUMENTS, "Documents", "Docs"),
 )
 
-# Items older than this count as read even without a TeamInboxRead row, so
-# the first rollout (and a new hire's first login) doesn't open on a pile of
-# months-old "unread" updates. Pinned announcements are exempt: pinning is
-# how a manager says "everyone should see this".
-STALE_AFTER = timedelta(days=30)
-
 # The admin "publish announcement" flow also sends every employee a
 # notification (kind "announcement") linking to the announcement. The Inbox
 # already lists the announcement itself, so those notifications are folded
@@ -236,15 +230,6 @@ def when_label(when: Optional[datetime], now: datetime, tz: tzinfo = timezone.ut
     return f"{month_day(local_when.date())}, {local_when.year}"
 
 
-def is_stale(when: Optional[datetime], now: datetime, *, pinned: bool = False) -> bool:
-    if pinned:
-        return False
-    when = as_utc(when)
-    if when is None:
-        return False
-    return as_utc(now) - when > STALE_AFTER
-
-
 def is_unread(
     kind: str,
     key: str,
@@ -254,9 +239,10 @@ def is_unread(
     *,
     pinned: bool = False,
 ) -> bool:
-    if (kind, str(key)) in read_keys:
-        return False
-    return not is_stale(when, now, pinned=pinned)
+    # An item is unread until the user opens it (or marks all read); age
+    # doesn't matter. `when`, `now` and `pinned` stay in the signature so
+    # every caller shares one rule if that ever changes.
+    return (kind, str(key)) not in read_keys
 
 
 def count_unread(

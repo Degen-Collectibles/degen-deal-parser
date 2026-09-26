@@ -168,7 +168,7 @@ class InboxRuleTests(unittest.TestCase):
             [("announcement", "1"), ("notification", "8")],
         )
 
-    def test_read_keys_and_stale_rule(self):
+    def test_read_keys_rule_ignores_age(self):
         from app.team.inbox import build_inbox, count_unread
 
         inbox = build_inbox(
@@ -183,14 +183,21 @@ class InboxRuleTests(unittest.TestCase):
             now=NOW,
         )
         unread = {(r["kind"], r["key"]) for r in inbox["rows"] if r["unread"]}
-        # 1 was opened; 2, 8 and the May document are over 30 days old;
-        # the pinned announcement never goes stale.
+        # Only 1 was opened. Age doesn't matter: items that are months old
+        # stay unread until the user opens them.
         self.assertEqual(
             unread,
-            {("announcement", "3"), ("notification", "7"), ("document", "new-handbook")},
+            {
+                ("announcement", "2"),
+                ("announcement", "3"),
+                ("notification", "7"),
+                ("notification", "8"),
+                ("document", "new-handbook"),
+                ("document", "old"),
+            },
         )
         candidates = [(r["kind"], r["key"], r["when"], r["pinned"]) for r in inbox["rows"]]
-        self.assertEqual(count_unread(candidates, {("announcement", "1")}, NOW), 3)
+        self.assertEqual(count_unread(candidates, {("announcement", "1")}, NOW), 6)
 
     def test_item_fields(self):
         from app.team.inbox import build_inbox
@@ -443,17 +450,18 @@ class InboxStoreTests(_InboxHarness, unittest.TestCase):
         mine = self._notification(ME)
         self._notification(OTHER)  # someone else's
         self._notification(ME, kind="announcement", link="/team/announcements")  # folded
-        self._notification(ME, age=timedelta(days=45))  # stale
-        # Visible + pinned + my notification; the shipped document is from
-        # May, so it's past the 30-day window.
-        self.assertEqual(self._count(), 3)
-        self.assertEqual(self._count(OTHER), 3)
+        self._notification(ME, age=timedelta(days=45))  # old, still unread
+        # Visible + old + old pinned announcements, both of my notifications
+        # and the shipped document. Age never marks anything read.
+        self.assertEqual(self._count(), 6)
+        # OTHER: the 3 announcements, their own notification, the document.
+        self.assertEqual(self._count(OTHER), 5)
         inbox_store.mark_read(self.session, ME, "announcement", str(visible.id))
         inbox_store.mark_read(self.session, ME, "notification", str(mine.id))
         self.session.commit()
-        self.assertEqual(self._count(), 1)
-        # Kinds the user can't see aren't counted.
-        self.assertEqual(self._count(kinds=("document",)), 0)
+        self.assertEqual(self._count(), 4)
+        # Only the kinds the user can see are counted: the shipped document alone.
+        self.assertEqual(self._count(kinds=("document",)), 1)
         self.assertEqual(self._count(kinds=()), 0)
 
     def test_new_documents_count_as_unread(self):
@@ -516,8 +524,9 @@ class InboxPageTests(_InboxHarness, unittest.TestCase):
         self.assertLess(html.index("Shift moved"), html.index("Restock Friday"))
         self.assertIn("TikTok Surprise Set Streamer Guide", html)
         self.assertNotIn("Not for Maya", html)
-        self.assertEqual(html.count('class="pt-dot-unread"'), 3)
-        self.assertIn("3 unread", html)
+        # 2 announcements + 1 update + the shipped document (old, never opened).
+        self.assertEqual(html.count('class="pt-dot-unread"'), 4)
+        self.assertIn("4 unread", html)
         self.assertIn('action="/team/inbox/read-all"', html)
         self.assertIn('<nav class="pt-seg pt-seg-4" aria-label="Filter inbox">', html)
         self.assertIn('href="/team/inbox?filter=documents"', html)
@@ -640,7 +649,8 @@ class InboxPageTests(_InboxHarness, unittest.TestCase):
         )
         self.assertEqual(r.headers["location"], "/team/inbox?filter=updates&flash=Marked+all+as+read.")
         self.assertEqual([k for k, _ in self._reads()], ["notification", "notification"])
-        self.assertEqual(self._count(), 1)
+        # The announcement and the shipped document are still unread.
+        self.assertEqual(self._count(), 2)
         r = team_inbox.team_inbox_read_all(
             self._request(self.maya, "/team/inbox/read-all"), filter="", session=self.session
         )
@@ -650,7 +660,8 @@ class InboxPageTests(_InboxHarness, unittest.TestCase):
             self._request(self.maya, "/team/inbox/read-all"), filter="", session=self.session
         )
         self.assertEqual(r.headers["location"], "/team/inbox?flash=Nothing+unread.")
-        self.assertEqual(len(self._reads()), 3)
+        # 2 notifications + the announcement + the shipped document.
+        self.assertEqual(len(self._reads()), 4)
         _, cap = self._inbox()
         html = self._render(cap)
         self.assertIn("All caught up", html)
@@ -726,7 +737,8 @@ class InboxNavTests(_InboxHarness, unittest.TestCase):
         for old in ("announcements", "notifications", "documents"):
             self.assertNotIn(old, names)
         self.assertIn("policies", names)
-        self.assertEqual(ctx["inbox_unread"], 2)
+        # Announcement + notification + the shipped document.
+        self.assertEqual(ctx["inbox_unread"], 3)
         self.assertLess(names.index("supply"), names.index("inbox"))
         self.assertLess(names.index("inbox"), names.index("policies"))
 
@@ -737,14 +749,15 @@ class InboxNavTests(_InboxHarness, unittest.TestCase):
         self._notification(ME)
         html = self._page(team.team_more, "/team/more")
         self.assertIn('<a class="pt-row" href="/team/inbox">', html)
-        self.assertIn('<span class="pt-count" aria-label="2 unread">2</span>', html)
+        # Announcement + notification + the shipped document.
+        self.assertIn('<span class="pt-count" aria-label="3 unread">3</span>', html)
         for old in ('href="/team/announcements"', 'href="/team/notifications"', 'href="/team/documents"'):
             self.assertNotIn(old, html)
         self.assertIn('href="/team/policies"', html)
         self.assertIn('href="/team/inbox#alerts"', html)
         nav = self._bottom_nav(html)
-        self.assertIn('aria-label="More, 2 unread"', nav)
-        self.assertIn('<span class="pt-mbn-badge" aria-hidden="true">2</span>', nav)
+        self.assertIn('aria-label="More, 3 unread"', nav)
+        self.assertIn('<span class="pt-mbn-badge" aria-hidden="true">3</span>', nav)
         self.assertEqual(nav.count('class="pt-mbn-item'), 5)
 
     def test_sidebar_single_inbox_link_with_count(self):
@@ -754,14 +767,19 @@ class InboxNavTests(_InboxHarness, unittest.TestCase):
         html = self._page(team.team_more, "/team/more")
         side = self._sidebar(html)
         self.assertEqual(side.count('href="/team/inbox"'), 1)
-        self.assertIn('<span class="pt-count pt-link-count" aria-label="1 unread">1</span>', side)
+        # Announcement + the shipped document.
+        self.assertIn('<span class="pt-count pt-link-count" aria-label="2 unread">2</span>', side)
         for old in ("/team/announcements", "/team/notifications", "/team/documents"):
             self.assertNotIn(old, side)
         self.assertIn('href="/team/policies"', side)
 
     def test_no_badge_when_nothing_unread(self):
         from app.routers import team
+        from app.team import inbox_store
 
+        # The shipped document starts unread for everyone; open it first.
+        inbox_store.mark_read(self.session, ME, "document", "surprise-set-guide")
+        self.session.commit()
         html = self._page(team.team_more, "/team/more")
         self.assertNotIn("pt-mbn-badge", html)
         self.assertNotIn("pt-link-count", html)

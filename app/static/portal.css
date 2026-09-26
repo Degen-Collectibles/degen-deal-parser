@@ -2843,8 +2843,8 @@ body.pt-sheet-lock { overflow: hidden; }
 .pt-mbn-item { position: relative; }
 .pt-mbn-badge {
   position: absolute;
-  top: 2px;
-  left: calc(50% + 6px);
+  top: 0;
+  left: calc(50% + 11px);
   min-width: 18px;
   height: 18px;
   padding: 0 5px;

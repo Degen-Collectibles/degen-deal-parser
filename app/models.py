@@ -1176,8 +1176,8 @@ class TeamPolicy(SQLModel, table=True):
 class TeamInboxRead(SQLModel, table=True):
     """Per-user read marker for an employee Inbox item (portal redesign P4).
 
-    A row means "this user has opened this item". No row means unread
-    (subject to the stale-item rule in app/team/inbox.py). New table, so
+    A row means "this user has opened this item". No row means unread.
+    New table, so
     ``SQLModel.metadata.create_all`` creates it on SQLite and Postgres; no
     column migration is involved.
 

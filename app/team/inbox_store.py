@@ -154,11 +154,9 @@ def unread_count(
             for ann_id, published, pinned in rows
         ]
     if inbox_view.KIND_NOTIFICATION in kinds:
-        cutoff = now - inbox_view.STALE_AFTER
         rows = session.exec(
             select(AuditLog.id, AuditLog.created_at)
             .where(*_notification_filters(user_id))
-            .where(AuditLog.created_at >= cutoff)
             .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
             .limit(NOTIFICATION_LIMIT)
         ).all()
@@ -176,10 +174,9 @@ def unread_count(
             )
             for doc in documents
         ]
-    live = [c for c in candidates if not inbox_view.is_stale(c[2], now, pinned=c[3])]
-    if not live:
+    if not candidates:
         return 0
-    return inbox_view.count_unread(live, read_keys(session, user_id, kinds), now)
+    return inbox_view.count_unread(candidates, read_keys(session, user_id, kinds), now)
 
 
 # ---------------------------------------------------------------------------
