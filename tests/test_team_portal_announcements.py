@@ -202,31 +202,28 @@ class TeamAnnouncementTests(unittest.TestCase):
         return templates.env.get_template("team/dashboard.html").render(context)
 
     def _announcements_html(self, user) -> str:
-        from app.routers.team import _active_announcements_for, _nav_context
-        from app.models import User
-        from app.shared import templates
+        # The old /team/announcements page is now the Inbox's Announcements
+        # filter (redesign Phase 4); render it through the real route.
+        from unittest.mock import patch
 
-        announcements = _active_announcements_for(self.session)
-        author_ids = {row.created_by_user_id for row in announcements}
-        authors = {
-            row.id: row
-            for row in self.session.exec(
-                select(User).where(User.id.in_(author_ids))
-            ).all()
-            if row.id is not None
-        }
-        request = _FakeRequest(user, path="/team/announcements")
-        context = {
-            "request": request,
-            "title": "Announcements",
-            "active": "announcements",
-            "current_user": user,
-            "announcements": announcements,
-            "authors": authors,
-            "csrf_token": "test-token",
-            **_nav_context(self.session, user),
-        }
-        return templates.env.get_template("team/announcements.html").render(context)
+        from app.routers import team_inbox
+
+        captured = {}
+
+        def fake_template_response(request, template, context):
+            captured["html"] = team_inbox.templates.env.get_template(template).render(context)
+            return SimpleNamespace(status_code=200)
+
+        with patch.object(
+            team_inbox.templates, "TemplateResponse", side_effect=fake_template_response
+        ):
+            team_inbox.team_inbox(
+                _FakeRequest(user, path="/team/inbox"),
+                filter="announcements",
+                flash=None,
+                session=self.session,
+            )
+        return captured["html"]
 
     def _admin_announcements_html(self, user) -> str:
         from app.shared import templates
@@ -443,12 +440,15 @@ class TeamAnnouncementTests(unittest.TestCase):
 
         self.assertNotIn("pt-list-stack", html)
 
-    def test_sidebar_shows_announcements_for_employee(self):
+    def test_sidebar_shows_inbox_for_employee(self):
+        # Announcements live in the Inbox now (redesign Phase 4): one sidebar
+        # link replaces Announcements / Notifications / Documents.
         employee = self._seed_user(16, role="employee", username="reader6")
 
         html = self._dashboard_html(employee)
 
-        self.assertIn('href="/team/announcements"', html)
+        self.assertIn('href="/team/inbox"', html)
+        self.assertNotIn('href="/team/announcements"', html)
 
     def test_admin_sidebar_shows_management_link(self):
         admin = self._seed_user(17, role="admin", username="admin17")

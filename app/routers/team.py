@@ -22,7 +22,7 @@ from urllib.parse import unquote, urlencode, urlparse
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
-from sqlalchemy import func, or_
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -78,6 +78,9 @@ from ..models import (
 from ..team.pii import PIIDecryptError, decrypt_pii, encrypt_pii
 from ..team.sms_consent import consent_context, record_consent
 from ..team import home as home_view
+from ..team import inbox as inbox_view
+from ..team import inbox_store
+from ..team.inbox import TEAM_DOCUMENTS  # noqa: F401 -- re-exported for callers/tests
 from ..team import schedule_view
 from ..team.shift_labels import parse_shift_start_minutes
 from ..rate_limit import rate_limited_or_429
@@ -126,22 +129,6 @@ LEGACY_POLICIES: tuple[dict, ...] = (
     },
 )
 LEGACY_POLICY_BY_ID = {p["id"]: p for p in LEGACY_POLICIES}
-
-
-TEAM_DOCUMENTS: tuple[dict[str, str], ...] = (
-    {
-        "title": "TikTok Surprise Set Streamer Guide",
-        "description": (
-            "How to build an official TikTok Surprise Set, explain the pool, "
-            "run dollar-start auctions, and keep the stream moving without "
-            "making guarantees."
-        ),
-        "category": "TikTok Live",
-        "updated": "2026-05-29",
-        "href": "/static/team-documents/surprise-set-guide.pdf",
-        "source_href": "/static/team-documents/surprise-set-guide.md",
-    },
-)
 
 
 # ---------------------------------------------------------------------------
@@ -780,22 +767,27 @@ def _nav_context(session: Session, user: User) -> dict:
     schedule_href = "/team/schedule"
     keys = (
         # Order mirrors the phone tabs (redesign 2026-09): Home, Schedule,
-        # Hours, then Requests, then reading, then Profile. base.html groups
-        # these by name; the flat list stays the permission source of truth.
+        # Hours, then Requests, then Inbox + Policies, then Profile. base.html
+        # groups these by name; the flat list stays the permission source of
+        # truth. "inbox" has no key of its own: it shows when the user may
+        # read announcements/updates (page.announcements) or documents
+        # (page.documents), and only those sections appear inside it.
         ("dashboard", "Home", "page.dashboard", "/team/"),
         ("schedule", "Schedule", "page.schedule", schedule_href),
         ("hours", "Hours", "page.hours", "/team/hours"),
         ("time-off", "Time off", "page.timeoff", "/team/requests?tab=timeoff"),
         ("supply", "Supply", "page.supply_requests", "/team/requests?tab=supply"),
-        ("announcements", "Announcements", "page.announcements", "/team/announcements"),
-        ("notifications", "Notifications", "page.announcements", "/team/notifications"),
-        ("documents", "Documents", "page.documents", "/team/documents"),
+        ("inbox", "Inbox", None, "/team/inbox"),
         ("policies", "Policies", "page.policies", "/team/policies"),
         ("profile", "Profile", "page.profile", "/team/profile"),
     )
+    inbox_kinds = _inbox_kinds_for(session, user, cache=cache)
     nav = []
     for name, label, key, href in keys:
-        if has_permission(session, user, key, cache=cache):
+        if name == "inbox":
+            if inbox_kinds:
+                nav.append({"name": name, "label": label, "href": href})
+        elif has_permission(session, user, key, cache=cache):
             nav.append({"name": name, "label": label, "href": href})
 
     # Admin-only section. Rendered as a separate group in the sidebar when
@@ -857,7 +849,23 @@ def _nav_context(session: Session, user: User) -> dict:
         "tools_nav_items": ops_nav,
         "schedule_href": schedule_href,
         "can_edit_schedule": can_edit_schedule,
+        "inbox_kinds": inbox_kinds,
+        # Sidebar Inbox item, More row and More-tab badge all read this.
+        "inbox_unread": (
+            inbox_store.unread_count(session, user.id, kinds=inbox_kinds)
+            if inbox_kinds and user.id is not None
+            else 0
+        ),
     }
+
+
+def _inbox_kinds_for(session: Session, user: User, *, cache: Optional[dict] = None) -> tuple[str, ...]:
+    """Inbox sections this user may see, from the existing page.* keys."""
+    cache = cache if cache is not None else {}
+    return inbox_view.allowed_kinds(
+        can_announcements=has_permission(session, user, "page.announcements", cache=cache),
+        can_documents=has_permission(session, user, "page.documents", cache=cache),
+    )
 
 
 def _portal_now(*, settings=None, now: Optional[datetime] = None) -> datetime:
@@ -1130,10 +1138,15 @@ def _employee_home_context(
         ),
         limit=3,
     )
-    latest = (
-        _active_announcements_for(session, limit=1)
-        if "announcements" in nav_names
-        else []
+    can_announcements = inbox_view.KIND_ANNOUNCEMENT in (nav_ctx.get("inbox_kinds") or ())
+    latest = _active_announcements_for(session, limit=1) if can_announcements else []
+    latest_unread = bool(latest) and inbox_view.is_unread(
+        inbox_view.KIND_ANNOUNCEMENT,
+        str(latest[0].id),
+        latest[0].published_at,
+        inbox_store.read_keys(session, user.id, (inbox_view.KIND_ANNOUNCEMENT,)),
+        utcnow(),
+        pinned=bool(latest[0].pinned),
     )
     hero = home_view.build_hero(
         now_local=now_local,
@@ -1168,8 +1181,13 @@ def _employee_home_context(
             "requests": request_rows,
             "can_requests": can_timeoff or can_supply,
             "latest": latest[0] if latest else None,
+            "latest_unread": latest_unread,
             "latest_posted": (
-                home_view.month_day(latest[0].published_at) if latest else ""
+                home_view.month_day(
+                    inbox_view.as_utc(latest[0].published_at).astimezone(now_local.tzinfo).date()
+                )
+                if latest and latest[0].published_at
+                else ""
             ),
             "schedule_href": schedule_href,
         },
@@ -1520,25 +1538,7 @@ def _active_announcements_for(
     *,
     limit: Optional[int] = None,
 ) -> list[TeamAnnouncement]:
-    now = utcnow()
-    stmt = (
-        select(TeamAnnouncement)
-        .where(TeamAnnouncement.is_active == True)  # noqa: E712
-        .where(
-            or_(
-                TeamAnnouncement.expires_at.is_(None),
-                TeamAnnouncement.expires_at > now,
-            )
-        )
-        .order_by(
-            TeamAnnouncement.pinned.desc(),
-            TeamAnnouncement.published_at.desc(),
-            TeamAnnouncement.id.desc(),
-        )
-    )
-    if limit is not None:
-        stmt = stmt.limit(limit)
-    return list(session.exec(stmt).all())
+    return inbox_store.active_announcements(session, limit=limit)
 
 
 def _policy_from_row(row: TeamPolicy) -> dict[str, Any]:
@@ -1759,84 +1759,17 @@ def team_notifications_poll(
     }
 
 
-@router.get("/team/announcements", response_class=HTMLResponse)
-def team_announcements(
-    request: Request,
-    session: Session = Depends(get_session),
-):
-    denial, user = _require_employee(
-        request, session, resource_key="page.announcements"
-    )
-    if denial:
-        return denial
-
-    announcements = _active_announcements_for(session)
-    creator_ids = {
-        row.created_by_user_id
-        for row in announcements
-        if row.created_by_user_id is not None
-    }
-    authors: dict[int, User] = {}
-    if creator_ids:
-        authors = {
-            author.id: author
-            for author in session.exec(
-                select(User).where(User.id.in_(creator_ids))
-            ).all()
-            if author.id is not None
-        }
-
-    return templates.TemplateResponse(
-        request,
-        "team/announcements.html",
-        {
-            "request": request,
-            "title": "Announcements",
-            "active": "announcements",
-            "current_user": user,
-            "announcements": announcements,
-            "authors": authors,
-            "csrf_token": issue_token(request),
-            **_nav_context(session, user),
-        },
-    )
+# The three old reading pages merged into /team/inbox (redesign Phase 4).
+# GETs redirect to the matching filter so bookmarks, SMS links and stored
+# notification `link_path`s keep working. The Inbox does the auth check.
+@router.get("/team/announcements")
+def team_announcements():
+    return RedirectResponse("/team/inbox?filter=announcements", status_code=303)
 
 
-@router.get("/team/notifications", response_class=HTMLResponse)
-def team_notifications(
-    request: Request,
-    session: Session = Depends(get_session),
-):
-    denial, user = _require_employee(
-        request, session, resource_key="page.announcements"
-    )
-    if denial:
-        return denial
-    profile_completion = _profile_completion_for(session, user)
-    timeoff_rows = session.exec(
-        select(TimeOffRequest)
-        .where(TimeOffRequest.submitted_by_user_id == user.id)
-        .where(TimeOffRequest.status.in_(("approved", "denied")))
-        .order_by(TimeOffRequest.updated_at.desc(), TimeOffRequest.id.desc())
-        .limit(5)
-    ).all()
-    return templates.TemplateResponse(
-        request,
-        "team/notifications.html",
-        {
-            "request": request,
-            "title": "Notifications",
-            "active": "notifications",
-            "current_user": user,
-            "notifications": _employee_notifications_for(session, user),
-            "active_announcements": _active_announcements_for(session, limit=5),
-            "timeoff_rows": list(timeoff_rows),
-            "profile_completion": profile_completion,
-            "sms_enabled": consent_context(session, user.id)["opted_in"],
-            "csrf_token": issue_token(request),
-            **_nav_context(session, user),
-        },
-    )
+@router.get("/team/notifications")
+def team_notifications():
+    return RedirectResponse("/team/inbox?filter=updates", status_code=303)
 
 
 @router.get("/team/help", response_class=HTMLResponse)
@@ -2513,27 +2446,9 @@ async def team_password_change_post(
     )
 
 
-@router.get("/team/documents", response_class=HTMLResponse)
-def team_documents(
-    request: Request,
-    session: Session = Depends(get_session),
-):
-    denial, user = _require_employee(request, session, resource_key="page.documents")
-    if denial:
-        return denial
-    return templates.TemplateResponse(
-        request,
-        "team/documents.html",
-        {
-            "request": request,
-            "title": "Documents",
-            "active": "documents",
-            "current_user": user,
-            "documents": TEAM_DOCUMENTS,
-            "csrf_token": issue_token(request),
-            **_nav_context(session, user),
-        },
-    )
+@router.get("/team/documents")
+def team_documents():
+    return RedirectResponse("/team/inbox?filter=documents", status_code=303)
 
 
 @router.get("/team/policies", response_class=HTMLResponse)

@@ -1173,6 +1173,33 @@ class TeamPolicy(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class TeamInboxRead(SQLModel, table=True):
+    """Per-user read marker for an employee Inbox item (portal redesign P4).
+
+    A row means "this user has opened this item". No row means unread
+    (subject to the stale-item rule in app/team/inbox.py). New table, so
+    ``SQLModel.metadata.create_all`` creates it on SQLite and Postgres; no
+    column migration is involved.
+
+    ``item_key`` is a string so items without an integer id (documents,
+    keyed by slug) fit the same table: announcement / notification keys are
+    ``str(row.id)`` of TeamAnnouncement / AuditLog.
+    """
+
+    __tablename__ = "team_inbox_read"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "item_kind", "item_key", name="uq_team_inbox_read_item"
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    item_kind: str = Field(max_length=20)
+    item_key: str = Field(max_length=120)
+    read_at: datetime = Field(default_factory=utcnow)
+
+
 class AuditLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     actor_user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)

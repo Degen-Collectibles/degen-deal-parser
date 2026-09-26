@@ -161,12 +161,14 @@ class SmsConsentTests(unittest.TestCase, _PortalHarness):
         self.assertEqual(json.loads(row.details_json)["sms"]["status"], "pilot_not_enabled")
 
     def test_notification_status_requires_consent_not_just_phone(self):
+        # SMS status moved from /team/notifications to the Inbox's
+        # "Alerts & texts" section (redesign Phase 4); the old URL redirects.
         response = self.client.get("/team/notifications")
         self.assertIn("Optional SMS subscription", response.text)
-        self.assertIn('<span class="pt-check-icon">Off</span>', response.text)
+        self.assertIn('<span class="pt-pill neutral" data-sms-status>Off</span>', response.text)
         self._grant()
         response = self.client.get("/team/notifications")
-        self.assertIn('<span class="pt-check-icon">On</span>', response.text)
+        self.assertIn('<span class="pt-pill ok" data-sms-status>On</span>', response.text)
 
     def test_role_removal_blocks_previously_consented_recipient(self):
         self._grant()

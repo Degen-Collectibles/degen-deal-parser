@@ -34,7 +34,7 @@
     </a>
     <a class="pt-help-tile" href="/team/help/tutorial">
       <strong>{% if current_user and current_user.role == "manager" %}Manager{% else %}Employee{% endif %} portal tour</strong>
-      <span>Where to find shifts, hours, schedules, announcements, policies, profile, and help.</span>
+      <span>Where to find shifts, hours, requests, your inbox, policies, profile, and help.</span>
     </a>
     {% if current_user and current_user.role in ("admin", "manager", "reviewer") %}
     <a class="pt-help-tile" href="/team/admin/tutorial">
