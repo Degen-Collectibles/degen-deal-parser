@@ -137,7 +137,10 @@
         </span>
       </li>
       {% else %}
-      <li class="pt-empty">No time entries this week yet.</li>
+      {#- Past weeks read the Clockify cache only (no live call), so an empty
+          past week is genuinely empty; a failed live fetch for this week shows
+          the "could not be loaded" state above instead. -#}
+      <li class="pt-empty">{% if is_this_week %}No time entries this week yet.{% else %}No hours logged that week.{% endif %}</li>
       {% endfor %}
     </ul>
   </section>

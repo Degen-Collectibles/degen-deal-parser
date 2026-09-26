@@ -650,6 +650,39 @@ class HoursRouteTests(unittest.TestCase, _RouteHarness):
         # Monday's 12-8 shift passed with nothing logged: a real flag.
         self.assertIn("Scheduled, but no hours logged", response.body)
 
+    def test_clockify_fetch_error_shows_error_state_not_empty_week(self):
+        from app.routers import team
+        from app.team.clockify import ClockifyApiError
+
+        with patch.object(team, "clockify_client_from_settings") as client:
+            client.return_value.get_user_time_entries.side_effect = ClockifyApiError(
+                "Clockify request failed with HTTP 503."
+            )
+            response, captured = self._render()
+        self.assertTrue(captured["context"]["clockify_error"])
+        self.assertIn("Your hours could not be loaded.", response.body)
+        self.assertNotIn("No time entries", response.body)
+        self.assertNotIn("pt-bars", response.body)
+
+    def test_empty_past_week_is_not_an_error_and_makes_no_live_call(self):
+        from app.routers import team
+
+        past = (MONDAY - timedelta(days=21)).isoformat()
+        with patch.object(team, "clockify_client_from_settings") as client, patch.object(
+            team, "get_settings", return_value=_settings()
+        ), patch.object(team, "_portal_today", return_value=TODAY):
+            response, captured = self._capture(
+                team.team_hours,
+                self._request(self.maya, "/team/hours"),
+                week=past,
+                session=self.session,
+            )
+        client.assert_not_called()
+        self.assertEqual(captured["context"]["clockify_error"], "")
+        self.assertIn("No hours logged that week.", response.body)
+        self.assertNotIn("this week yet", response.body)
+        self.assertNotIn("could not be loaded", response.body)
+
     def test_template_has_no_inline_styles_or_small_type(self):
         source = Path("app/templates/team/hours.html").read_text(encoding="utf-8")
         self.assertNotIn("<style", source)
