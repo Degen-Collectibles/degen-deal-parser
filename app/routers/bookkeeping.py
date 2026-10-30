@@ -886,7 +886,8 @@ def bank_reconciliation_export_csv(
             "review_note",
         ]
     )
-    for row in rows:
+    from ..bank_allocations import expand_bank_allocations
+    for row in expand_bank_allocations(rows, errors=[]):
         writer.writerow(
             [
                 escape_spreadsheet_text(value)

@@ -73,7 +73,7 @@ def ledger_row_allocation_form(
         session.rollback()
         return JSONResponse({"error": str(exc)}, status_code=400)
     invalidate_financial_report_caches()
-    return RedirectResponse(f"/ledger?status=all&search={row_id}", status_code=303)
+    return RedirectResponse("/ledger?" + urlencode({"status": "all", "search": row.description or ""}), status_code=303)
 
 LEDGER_EXPORT_COLUMNS = [
     "row_id",

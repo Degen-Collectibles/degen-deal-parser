@@ -399,7 +399,7 @@ def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) 
         "classification_label": classification_label(row.classification or ""),
         "confidence": row.confidence,
         "expense_category": category,
-        "expense_category_label": expense_category_label(category),
+        "expense_category_label": ("Allocation needs correction" if allocation_error else "Split allocation" if allocations else expense_category_label(category)),
         "expense_subcategory": row.expense_subcategory or "",
         "category_confidence": row.category_confidence,
         "category_reason": row.category_reason or "",
