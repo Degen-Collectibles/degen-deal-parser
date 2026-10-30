@@ -290,6 +290,7 @@ SQLITE_ADDITIVE_MIGRATIONS = {
         "requested_quantity": "INTEGER",
     },
     "bank_transactions": {
+        "allocations_json": "TEXT DEFAULT '[]'",
         "expense_category": "TEXT DEFAULT 'uncategorized'",
         "expense_subcategory": "TEXT",
         "category_confidence": "TEXT DEFAULT 'low'",
@@ -778,6 +779,7 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
         "requested_quantity": "INTEGER",
     },
     "bank_transactions": {
+        "allocations_json": "TEXT DEFAULT '[]'",
         "expense_category": "TEXT DEFAULT 'uncategorized'",
         "expense_subcategory": "TEXT",
         "category_confidence": "TEXT DEFAULT 'low'",

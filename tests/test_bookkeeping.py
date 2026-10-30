@@ -468,7 +468,7 @@ class PlaidWebhookVerificationTests(unittest.TestCase):
                 cache_set("reports:test", {"stale": True})
                 cache_set("other:test", {"keep": True})
 
-                with patch("app.routers.bookkeeping.require_role_response", return_value=None):
+                with patch("app.routers.bookkeeping.require_role_response", return_value=None), patch("app.routers.bookkeeping.current_user_label", return_value="test reviewer"):
                     response = bank_reconciliation_row_status_form(
                         request=object(),
                         row_id=101,

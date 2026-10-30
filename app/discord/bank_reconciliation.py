@@ -13,6 +13,7 @@ from sqlmodel import Session, delete, select
 
 from ..models import BankFeedAccount, BankStatementImport, BankTransaction, Transaction, normalize_money_value, utcnow
 from .transactions import transaction_base_query
+from ..bank_allocations import expand_bank_allocations
 
 
 CLASSIFICATION_LABELS = {
@@ -87,6 +88,8 @@ UNPAID_DISCORD_MARKERS = (
 )
 
 EXPENSE_CATEGORY_LABELS = {
+    "employee_advances": "Employee reimbursable advances",
+    "employee_reimbursements": "Employee reimbursements (not sales)",
     "inventory_purchases": "Inventory purchases",
     "cash_inventory_purchases": "Cash inventory purchases",
     "grading_fees": "Grading fees",
@@ -115,7 +118,7 @@ EXPENSE_CATEGORY_LABELS = {
     "uncategorized": "Uncategorized",
 }
 
-NON_OPERATING_EXPENSE_CATEGORIES = {"transfers", "loan_owner_payments", "loan_proceeds", "partner_paybacks"}
+NON_OPERATING_EXPENSE_CATEGORIES = {"transfers", "loan_owner_payments", "loan_proceeds", "partner_paybacks", "employee_advances", "employee_reimbursements"}
 FINANCE_EXCLUDED_EXPENSE_CATEGORIES = {"cash_inventory_purchases", "transfers"}
 BANK_ACCOUNT_FILTERS = {"all", "checking", "credit_card"}
 BANK_ACCOUNT_FILTER_LABELS = {
@@ -779,7 +782,32 @@ def load_matchable_transactions(session: Session, rows: list[dict[str, Any]]) ->
         return []
     start = datetime.combine(min(dates) - timedelta(days=7), time.min, tzinfo=timezone.utc)
     end = datetime.combine(max(dates) + timedelta(days=7), time.max, tzinfo=timezone.utc)
-    return list(session.exec(transaction_base_query(start=start, end=end)).all())
+    transactions = list(session.exec(transaction_base_query(start=start, end=end)).all())
+    transaction_ids = [tx.id for tx in transactions if tx.id is not None]
+    holders = session.exec(select(BankTransaction).where(
+        BankTransaction.matched_transaction_id.in_(transaction_ids),
+        BankTransaction.pending == False, BankTransaction.is_removed == False,  # noqa: E712
+    )).all() if transaction_ids else []
+    by_transaction: dict[int, list[BankTransaction]] = {}
+    for holder in holders:
+        by_transaction.setdefault(holder.matched_transaction_id, []).append(holder)
+    for payload in rows:
+        def same_movement(holder):
+            if payload.get("id") == holder.id:
+                return True
+            provider_id = payload.get("provider_transaction_id")
+            if provider_id and provider_id == holder.provider_transaction_id:
+                return True
+            # Only actual relink/import copies can reuse a consumed log entry.
+            # Do not treat two identical charges in the same import as copies.
+            return (payload.get("import_id") != holder.import_id
+                    and str(payload.get("account_label") or "").strip().lower() == str(holder.account_label or "").strip().lower()
+                    and str(payload.get("account_type") or "").strip().lower() == str(holder.account_type or "").strip().lower()
+                    and _bank_row_semantic_fingerprint(payload) == _bank_row_semantic_fingerprint(_bank_transaction_dedupe_payload(holder)))
+        payload["unavailable_transaction_ids"] = {
+            tx_id for tx_id, claims in by_transaction.items() if not all(same_movement(holder) for holder in claims)
+        }
+    return transactions
 
 
 def _transaction_match_amount(row: Transaction) -> float:
@@ -819,6 +847,8 @@ def match_bank_rows_to_transactions(
         candidates: list[tuple[int, int, Transaction]] = []
         if not discord_match_block_reason:
             for tx in transactions:
+                if tx.id in bank_row.get("unavailable_transaction_ids", set()):
+                    continue
                 if tx.id in used_transaction_ids:
                     continue
                 if transaction_bank_match_block_reason(tx):
@@ -902,50 +932,38 @@ def _bank_transaction_dedupe_payload(row: BankTransaction) -> dict[str, Any]:
     }
 
 
-def dedupe_bank_rows_for_reporting(rows: list[BankTransaction]) -> list[BankTransaction]:
-    """Hide duplicate Plaid relink copies while preserving real repeated rows.
-
-    Plaid can assign new account ids and transaction ids when the same Chase
-    account is linked again. Those rows are still the same real-world bank
-    movements, so finance/ledger reporting should keep the first copy of each
-    occurrence and ignore the relinked copy.
-    """
-    seen_occurrences: set[tuple[str, str, str, int]] = set()
-    occurrence_by_import: dict[tuple[str, str, int, str], int] = {}
-    accepted_indexes: list[int] = []
-
-    def normalized_sort_time(value: Optional[datetime]) -> datetime:
-        if value is None:
-            return datetime.min
-        if value.tzinfo is not None:
-            return value.astimezone(timezone.utc).replace(tzinfo=None)
-        return value
-
-    def sort_key(item: tuple[int, BankTransaction]) -> tuple[Any, ...]:
-        index, row = item
-        return (
-            normalized_sort_time(row.created_at),
-            row.import_id or 0,
-            row.row_index or 0,
-            row.id or 0,
-            index,
-        )
-
-    for index, row in sorted(enumerate(rows), key=sort_key):
-        account_label = (row.account_label or "").strip().lower()
-        account_type = (row.account_type or "").strip().lower()
+def bank_reporting_groups(rows: list[BankTransaction]) -> list[list[BankTransaction]]:
+    """Group relink copies by occurrence; preserve repeated charges within an import."""
+    groups = {}
+    occurrences = {}
+    def key(row):
+        created = row.created_at or datetime.min
+        if created.tzinfo is not None:
+            created = created.astimezone(timezone.utc).replace(tzinfo=None)
+        return created, row.import_id or 0, row.row_index or 0, row.id or 0
+    for row in sorted(rows, key=key):
+        account = ((row.account_label or "").strip().lower(), (row.account_type or "").strip().lower())
         fingerprint = _bank_row_semantic_fingerprint(_bank_transaction_dedupe_payload(row))
-        import_key = (account_label, account_type, int(row.import_id or 0), fingerprint)
-        occurrence_index = occurrence_by_import.get(import_key, 0)
-        occurrence_by_import[import_key] = occurrence_index + 1
-        reporting_key = (account_label, account_type, fingerprint, occurrence_index)
-        if reporting_key in seen_occurrences:
-            continue
-        seen_occurrences.add(reporting_key)
-        accepted_indexes.append(index)
+        import_key = (*account, row.import_id or 0, fingerprint)
+        occurrence = occurrences.get(import_key, 0)
+        occurrences[import_key] = occurrence + 1
+        groups.setdefault((*account, fingerprint, occurrence), []).append(row)
+    return list(groups.values())
 
-    accepted = set(accepted_indexes)
-    return [row for index, row in enumerate(rows) if index in accepted]
+
+def dedupe_bank_rows_for_reporting(rows: list[BankTransaction]) -> list[BankTransaction]:
+    kept = {}
+    for group in bank_reporting_groups(rows):
+        first = group[0]
+        allocated = [r for r in group if (r.allocations_json or "[]") != "[]"]
+        if allocated:
+            split = allocated[0].allocations_json
+            if any(r.allocations_json != split for r in allocated):
+                first = first.model_copy(update={"allocation_error": "Conflicting splits across duplicate bank copies; edit the allocation to resolve."})
+            else:
+                first = first.model_copy(update={"allocations_json": split})
+        kept[id(group[0])] = first
+    return [kept[id(r)] for r in rows if id(r) in kept]
 
 
 def _backfill_account_bank_row_dedupe_keys(
@@ -1249,6 +1267,11 @@ def rerun_bank_reconciliation(session: Session, import_id: int) -> BankStatement
     for row in rows:
         payloads.append(
             {
+                "id": row.id,
+                "import_id": row.import_id,
+                "account_label": row.account_label,
+                "account_type": row.account_type,
+                "provider_transaction_id": row.provider_transaction_id,
                 "row_index": row.row_index,
                 "posted_at": row.posted_at,
                 "transaction_at": row.transaction_at,
@@ -1353,7 +1376,10 @@ def get_bank_transactions(
 
 
 def summarize_bank_transactions(rows: list[BankTransaction]) -> dict[str, Any]:
+    cash_row_count = len(rows)
     counts = Counter(row.classification for row in rows)
+    allocation_errors = []
+    rows = expand_bank_allocations(rows, errors=allocation_errors)
     category_counts = Counter(row.expense_category or "uncategorized" for row in rows if float(row.amount or 0.0) < 0)
     open_attention = [
         row
@@ -1380,7 +1406,8 @@ def summarize_bank_transactions(rows: list[BankTransaction]) -> dict[str, Any]:
         if float(row.amount or 0.0) < 0 and (row.expense_category or "uncategorized") == "uncategorized"
     ]
     return {
-        "rows": len(rows),
+        "rows": cash_row_count,
+        "allocation_errors": allocation_errors,
         "credits": credits,
         "debits": debits,
         "expense_total": round(sum(abs(float(row.amount or 0.0)) for row in operating_expense_rows), 2),
@@ -1388,9 +1415,9 @@ def summarize_bank_transactions(rows: list[BankTransaction]) -> dict[str, Any]:
         "net": round(credits + debits, 2),
         "matched": counts["logged_in_discord_strong"] + counts["logged_in_discord_possible"],
         "payouts": counts["shopify_payout"] + counts["tiktok_payout"] + counts["processor_payout"] + counts["paypal_payout"],
-        "attention": len(open_attention),
+        "attention": len({getattr(r, "id", None) or id(r) for r in open_attention}),
         "expense_categories": len(category_counts),
-        "uncategorized_expenses": len(uncategorized_expenses),
+        "uncategorized_expenses": len({getattr(r, "id", None) or id(r) for r in uncategorized_expenses}),
         "classification_counts": counts,
         "category_counts": category_counts,
     }
@@ -1412,6 +1439,7 @@ def build_classification_options(rows: list[BankTransaction]) -> list[dict[str, 
 
 
 def build_expense_category_options(rows: list[BankTransaction]) -> list[dict[str, Any]]:
+    rows = expand_bank_allocations(rows, errors=[])
     totals: dict[str, dict[str, Any]] = {}
     for row in rows:
         if float(row.amount or 0.0) >= 0:
@@ -1477,7 +1505,10 @@ def build_finance_bank_expense_data(
     )
     if selected_account != "all":
         stmt = stmt.where(BankTransaction.account_type == selected_account)
-    rows = dedupe_bank_rows_for_reporting([row for row in session.exec(stmt).all() if not row.is_removed])
+    rows = dedupe_bank_rows_for_reporting([row for row in session.exec(stmt).all() if not row.is_removed and not row.pending])
+    cash_row_count = len(rows)
+    allocation_errors = []
+    rows = expand_bank_allocations(rows, errors=allocation_errors)
 
     category_totals: dict[str, dict[str, Any]] = {}
     account_totals: dict[str, dict[str, Any]] = {}
@@ -1535,6 +1566,7 @@ def build_finance_bank_expense_data(
                 "amount": round(amount, 2),
                 "category": category,
                 "category_label": expense_category_label(category),
+                "allocation_note": row.expense_subcategory or "",
                 "group": category_group,
                 "is_discord_logged": is_discord_logged,
                 "is_non_operating": is_non_operating,
@@ -1731,10 +1763,12 @@ def build_finance_bank_expense_data(
     return {
         "account_filter": selected_account,
         "account_filter_label": bank_account_filter_label(selected_account),
-        "row_count": len(rows),
+        "row_count": cash_row_count,
+        "allocation_row_count": len(rows),
+        "allocation_errors": allocation_errors,
         "gross_outflow_total": round(gross_outflow_total, 2),
         "bank_only_total": round(bank_only_total, 2),
-        "bank_only_count": len(rows) - discord_logged_count - finance_excluded_count,
+        "bank_only_count": len({r["id"] for r in detail_rows if not r["is_discord_logged"] and not r["excluded_from_finance"]}),
         "discord_logged_total": round(discord_logged_total, 2),
         "discord_logged_count": discord_logged_count,
         "finance_excluded_total": round(finance_excluded_total, 2),

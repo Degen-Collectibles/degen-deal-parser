@@ -51,6 +51,30 @@ from ..shared import *  # noqa: F401,F403 -- templates, auth helpers, user label
 router = APIRouter(route_class=CSRFProtectedRoute)
 logger = logging.getLogger(__name__)
 
+
+@router.post("/ledger/rows/{row_id}/allocation-form")
+def ledger_row_allocation_form(
+    row_id: int, request: Request, employee_amount: str = Form(...),
+    business_category: str = Form(...), note: str = Form(...),
+    estimated: bool = Form(default=False), session: Session = Depends(get_session),
+):
+    from ..bank_allocations import set_employee_allocation
+    if denial := require_role_response(request, "reviewer"):
+        return denial
+    row = session.exec(select(BankTransaction).where(BankTransaction.id == row_id).with_for_update()).first()
+    if row is None:
+        return JSONResponse({"error": "Bank row not found"}, status_code=404)
+    try:
+        set_employee_allocation(session, row, employee_amount=employee_amount,
+                                business_category=business_category, estimated=estimated,
+                                note=note, actor_label=current_user_label(request))
+        session.commit()
+    except ValueError as exc:
+        session.rollback()
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    invalidate_financial_report_caches()
+    return RedirectResponse(f"/ledger?status=all&search={row_id}", status_code=303)
+
 LEDGER_EXPORT_COLUMNS = [
     "row_id",
     "row_kind",
@@ -66,6 +90,7 @@ LEDGER_EXPORT_COLUMNS = [
     "match_reason",
     "review_status",
     "review_note",
+    "allocations_json",
 ]
 
 def _escape_spreadsheet_text(value: object) -> object:
@@ -110,6 +135,15 @@ def _ledger_export_filters(
 
 def _ledger_export_rows(session: Session, filters: LedgerFilters) -> list[list[object]]:
     data = build_ledger_page_data(session, filters)
+    export_rows = []
+    for original in data["rows"]:
+        parts = original.get("allocations") or []
+        if parts and not original.get("allocation_error"):
+            for part in parts:
+                export_rows.append({**original, "amount": (-1 if original["amount"] < 0 else 1) * part["amount_cents"] / 100,
+                                    "expense_category": part["category"]})
+        else:
+            export_rows.append(original)
     return [
         [
             row["id"],
@@ -126,8 +160,9 @@ def _ledger_export_rows(session: Session, filters: LedgerFilters) -> list[list[o
             row.get("match_reason"),
             row.get("review_status"),
             row.get("review_note"),
+            row.get("allocations_json", "[]"),
         ]
-        for row in data["rows"]
+        for row in export_rows
     ]
 
 
@@ -466,10 +501,17 @@ def ledger_row_status_form(
 ):
     if denial := require_role_response(request, "reviewer"):
         return denial
+    from ..bank_allocations import EMPLOYEE_CATEGORIES
+    if expense_category in EMPLOYEE_CATEGORIES:
+        return JSONResponse({"error": "Use the audited employee allocation form."}, status_code=400)
     row = session.get(BankTransaction, row_id)
     if row:
         before = _bank_transaction_audit_snapshot(row)
         changed = False
+        if (row.allocations_json or "[]") != "[]" and (
+            (expense_category and expense_category != row.expense_category) or classification
+        ):
+            return JSONResponse({"error": "Edit the allocation or clear it before changing its category/match."}, status_code=400)
         if classification:
             row.classification = classification
             changed = True
@@ -549,6 +591,8 @@ def ledger_row_force_unmatch_form(
     if row:
         before = _bank_transaction_audit_snapshot(row)
         if mode in {"clear", "none"}:
+            if (row.allocations_json or "[]") != "[]":
+                return JSONResponse({"error": "Clear the allocation before enabling automatic matching."}, status_code=400)
             row.match_override_status = None
             row.match_override_note = None
             row.match_override_at = None
@@ -562,6 +606,8 @@ def ledger_row_force_unmatch_form(
             row.matched_transaction_id = None
             row.matched_source_message_id = None
             row.matched_platform = None
+            from ..discord.bank_reconciliation import base_classification
+            row.classification = base_classification(row.description, row.amount)
             row.match_reason = "Manually forced unmatched from the ledger."
             success = "Forced row unmatched"
         row.updated_at = utcnow()

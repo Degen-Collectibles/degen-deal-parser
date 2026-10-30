@@ -85,6 +85,9 @@ SHEET_ENTRY_KIND_HINTS = {
     "overview": None,
 }
 NON_BOOKKEEPING_SHEET_NAMES = {
+    "codes_calculation",
+    "codes_and_calculation",
+    "monthly_expenses",
     "card_list",
     "cardlist",
     "paste",
@@ -437,15 +440,35 @@ def infer_category(row: dict[str, Any]) -> Optional[str]:
 
 def infer_occurred_at(row: dict[str, Any]) -> Optional[datetime]:
     for key, value in row.items():
-        if looks_like_header(key.lower(), DATE_HEADER_HINTS):
+        header = normalize_header(key)
+        if header in {*DATE_HEADER_HINTS, "datetime", "dates"} or header.startswith("date_") or header.endswith("_date"):
             parsed = parse_optional_datetime(value)
             if parsed:
                 return parsed
     for value in row.values():
+        # Numeric cells outside a date column are money, quantities or IDs.
+        # Only explicit date columns may contain Excel serial dates.
+        if isinstance(value, (int, float)):
+            continue
         parsed = parse_optional_datetime(value)
         if parsed:
             return parsed
     return None
+
+
+def is_bookkeeping_summary_row(row: dict[str, Any]) -> bool:
+    """Skip exact summary labels, never substrings in genuine descriptions."""
+    labels = {"total", "subtotal", "grand_total", "total_actual_expenses",
+              "total_projected_expenses", "total_income", "total_expenses",
+              "total_sales", "net_profit", "profit_overview"}
+    # Side-column instructions must not suppress a real transaction. Consider
+    # the first populated text cell (the label column in exported templates).
+    for value in row.values():
+        if isinstance(value, str) and value.strip():
+            if parse_optional_float(value) is not None:
+                continue
+            return normalize_header(value) in labels
+    return False
 
 
 def collect_amount_candidates(row: dict[str, Any], hints: tuple[str, ...]) -> list[float]:
@@ -522,6 +545,21 @@ def is_non_bookkeeping_reference_sheet(sheet_name: Optional[str], row: dict[str,
         )
     )
     return card_header_count >= 3 and bookkeeping_header_count == 0
+
+
+def bookkeeping_exclusion_reason(entry: BookkeepingEntry) -> str:
+    """Re-evaluate legacy imports without changing their immutable raw cells."""
+    try:
+        raw = json.loads(entry.raw_row_json or "{}")
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    if normalize_header(entry.sheet_name) == "overview" or is_non_bookkeeping_reference_sheet(entry.sheet_name, raw):
+        return "Summary/calculation/reference sheet, not individual transactions"
+    if is_bookkeeping_summary_row(raw):
+        return "Summary total, not an individual transaction"
+    return ""
 
 
 def infer_amount_fields(row: dict[str, Any]) -> tuple[Optional[float], Optional[float], Optional[float]]:
@@ -657,6 +695,8 @@ def normalize_bookkeeping_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any
         if is_non_bookkeeping_reference_sheet(sheet_name, normalized_row):
             continue
         if is_header_like_row(normalized_row):
+            continue
+        if is_bookkeeping_summary_row(normalized_row):
             continue
 
         date_value = infer_occurred_at(normalized_row)
@@ -989,6 +1029,19 @@ def reconcile_bookkeeping_import(session: Session, bookkeeping_import_id: int) -
         .order_by(BookkeepingEntry.row_index)
     ).all()
 
+    excluded = []
+    active_entries = []
+    for entry in entries:
+        reason = bookkeeping_exclusion_reason(entry)
+        if not reason:
+            active_entries.append(entry)
+            continue
+        # Rendering/reconciliation excludes these without mutating legacy sources.
+        # The explicit guarded repair records persisted quarantine with backups.
+        entry = entry.model_copy(update={"match_status": "excluded_summary", "matched_transaction_id": None})
+        excluded.append((entry, reason))
+    entries = active_entries
+
     inferred_start = import_row.range_start
     inferred_end = import_row.range_end
     entry_dates = [entry.occurred_at for entry in entries if entry.occurred_at]
@@ -1007,7 +1060,11 @@ def reconcile_bookkeeping_import(session: Session, bookkeeping_import_id: int) -
     matched = 0
     mismatched = 0
     unmatched = 0
-    detailed_rows = []
+    detailed_rows = [{"row_index": entry.row_index, "sheet_name": entry.sheet_name or "",
+        "occurred_at": "", "entry_kind": entry.entry_kind or "", "amount": entry.amount,
+        "payment_method": entry.payment_method or "", "category": entry.category or "",
+        "notes": entry.notes or "", "match_status": "excluded_summary", "match_reason": reason,
+        "match_score": None, "matched_transaction": None} for entry, reason in excluded]
 
     for entry in entries:
         best_match: Optional[Transaction] = None
@@ -1077,6 +1134,7 @@ def reconcile_bookkeeping_import(session: Session, bookkeeping_import_id: int) -
         "import": import_row,
         "entries": detailed_rows,
         "summary": {
+            "excluded_summary_rows": len(excluded),
             "import_rows": len(entries),
             "matched_exact": matched,
             "matched_amount_only": mismatched,

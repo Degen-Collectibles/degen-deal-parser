@@ -300,6 +300,7 @@
 
         <div class="layout">
             <main>
+{% if summary and summary.get('allocation_errors') %}<div role="alert">Allocation errors: full affected amounts remain unsplit and uncategorized. Correct in the ledger; totals are provisional. {% for error in summary['allocation_errors'] %}Row {{ error.id }}: {{ error.error }} {% endfor %}</div>{% endif %}
                 {% if selected_import and summary %}
                 <section class="metric-grid">
                     <div class="metric"><div class="metric-label">Expense Total</div><div class="metric-value">{{ summary["expense_total"]|money(2) }}</div></div>

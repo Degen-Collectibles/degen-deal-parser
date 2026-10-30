@@ -537,6 +537,17 @@ def _apply_payloads(session: Session, import_row: BankStatementImport, payloads:
     if not payloads:
         return (0, 0)
 
+    # Provider modifications must not silently undo reviewer unmatches/splits.
+    provider_ids = [str(p.get("provider_transaction_id") or "") for p in payloads]
+    existing_rows = session.exec(select(BankTransaction).where(
+        BankTransaction.provider_transaction_id.in_(provider_ids))).all()
+    existing_by_id = {r.provider_transaction_id: r for r in existing_rows}
+    for payload in payloads:
+        payload["import_id"] = import_row.id
+        existing = existing_by_id.get(str(payload.get("provider_transaction_id") or ""))
+        if existing and (existing.match_override_status == "force_unmatched" or (existing.allocations_json or "[]") != "[]"):
+            payload["match_override_status"] = "force_unmatched"
+            payload["expense_category"] = existing.expense_category
     match_bank_rows_to_transactions(payloads, load_matchable_transactions(session, payloads))
     inserted = 0
     updated = 0

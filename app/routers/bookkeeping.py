@@ -794,6 +794,13 @@ def bank_reconciliation_row_status_form(
         return denial
     row = session.get(BankTransaction, row_id)
     if row:
+        from ..bank_allocations import EMPLOYEE_CATEGORIES
+        from ..financial_audit import record_financial_audit
+        if expense_category in EMPLOYEE_CATEGORIES:
+            return JSONResponse({"error": "Use the audited employee allocation form in the ledger."}, status_code=400)
+        if (row.allocations_json or "[]") != "[]" and (classification or (expense_category and expense_category != row.expense_category)):
+            return JSONResponse({"error": "Edit or clear the allocation in the ledger first."}, status_code=400)
+        before = row.model_dump(mode="json")
         if classification:
             row.classification = classification
         if expense_category:
@@ -806,6 +813,8 @@ def bank_reconciliation_row_status_form(
         row.review_note = (note or "").strip() or None
         row.updated_at = utcnow()
         session.add(row)
+        record_financial_audit(session, action="financial.bank.row_edit", resource_key=f"bank_transactions:{row.id}",
+            before=before, after=row.model_dump(mode="json"), actor_label=current_user_label(request), note=(note or "").strip())
         session.commit()
         invalidate_financial_report_caches()
     return RedirectResponse(
