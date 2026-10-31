@@ -189,3 +189,10 @@ def test_invalid_allocation_does_not_break_summary_and_can_clear():
     row.classification='logged_in_discord_strong'
     set_employee_allocation(Stub(),row,employee_amount='0',business_category='grading_fees',estimated=False,note='clear invalid',actor_label='reviewer')
     assert row.allocations_json=='[]'
+
+
+def test_unmatched_candidate_overlap_is_visible_in_finance_summary():
+    row=bank(match_override_note='[unresolved-discord-overlap] Candidate 99; exact payment unknown')
+    result=summarize_bank_transactions([row])
+    assert len(result['reconciliation_warnings'])==1
+    assert result['debits']==-3410.37

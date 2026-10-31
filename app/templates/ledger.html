@@ -828,7 +828,7 @@
                                             </label>
                                             <label>Category
                                                 <select name="expense_category">
-                                                    {% for choice in category_choices %}
+                                                    {% for choice in category_choices if choice.value not in ["employee_advances", "employee_reimbursements"] %}
                                                     <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
                                                     {% endfor %}
                                                 </select>

@@ -1375,8 +1375,14 @@ def get_bank_transactions(
     return sorted(rows, key=lambda row: (row.row_index, row.id or 0))
 
 
+def bank_reconciliation_warnings(rows):
+    return [{"id": getattr(row, "id", None), "note": row.match_override_note}
+            for row in rows if "[unresolved-discord-overlap]" in (getattr(row, "match_override_note", None) or "")]
+
+
 def summarize_bank_transactions(rows: list[BankTransaction]) -> dict[str, Any]:
     cash_row_count = len(rows)
+    reconciliation_warnings = bank_reconciliation_warnings(rows)
     counts = Counter(row.classification for row in rows)
     allocation_errors = []
     rows = expand_bank_allocations(rows, errors=allocation_errors)
@@ -1408,6 +1414,7 @@ def summarize_bank_transactions(rows: list[BankTransaction]) -> dict[str, Any]:
     return {
         "rows": cash_row_count,
         "allocation_errors": allocation_errors,
+        "reconciliation_warnings": reconciliation_warnings,
         "credits": credits,
         "debits": debits,
         "expense_total": round(sum(abs(float(row.amount or 0.0)) for row in operating_expense_rows), 2),
@@ -1507,6 +1514,7 @@ def build_finance_bank_expense_data(
         stmt = stmt.where(BankTransaction.account_type == selected_account)
     rows = dedupe_bank_rows_for_reporting([row for row in session.exec(stmt).all() if not row.is_removed and not row.pending])
     cash_row_count = len(rows)
+    reconciliation_warnings = bank_reconciliation_warnings(rows)
     allocation_errors = []
     rows = expand_bank_allocations(rows, errors=allocation_errors)
 
@@ -1766,6 +1774,7 @@ def build_finance_bank_expense_data(
         "row_count": cash_row_count,
         "allocation_row_count": len(rows),
         "allocation_errors": allocation_errors,
+        "reconciliation_warnings": reconciliation_warnings,
         "gross_outflow_total": round(gross_outflow_total, 2),
         "bank_only_total": round(bank_only_total, 2),
         "bank_only_count": len({r["id"] for r in detail_rows if not r["is_discord_logged"] and not r["excluded_from_finance"]}),

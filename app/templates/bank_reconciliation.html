@@ -300,6 +300,7 @@
 
         <div class="layout">
             <main>
+{% if summary and summary.get('reconciliation_warnings') %}<div role="alert">Unresolved bank/Discord overlap: bank-only purchases may also appear in Discord inventory totals. Combined purchase totals are provisional. Review the candidate links in the ledger; no payment identity has been assumed. Rows: {% for warning in summary['reconciliation_warnings'] %}{{ warning.id }} {% endfor %}</div>{% endif %}
 {% if summary and summary.get('allocation_errors') %}<div role="alert">Allocation errors: full affected amounts remain unsplit and uncategorized. Correct in the ledger; totals are provisional. {% for error in summary['allocation_errors'] %}Row {{ error.id }}: {{ error.error }} {% endfor %}</div>{% endif %}
                 {% if selected_import and summary %}
                 <section class="metric-grid">

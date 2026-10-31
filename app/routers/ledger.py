@@ -352,6 +352,9 @@ def ledger_transaction_edit_form(
     if denial := require_role_response(request, "reviewer"):
         return denial
 
+    from ..bank_allocations import EMPLOYEE_CATEGORIES
+    if expense_category in EMPLOYEE_CATEGORIES:
+        return JSONResponse({"error": "Employee allocation categories are bank-only; they do not adjust Discord revenue or expense."}, status_code=400)
     row = session.get(DiscordMessage, source_message_id)
     if not row:
         if _wants_json(request):

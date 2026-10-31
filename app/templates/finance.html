@@ -1158,6 +1158,7 @@
                     <p class="section-copy">Checking and credit-card outflows from Chase, reconciled against Discord logs. The headline statement uses all bank accounts; these account buttons only filter the detail charts below. Rows already matched to Discord transactions are shown separately and excluded from bank-only totals to avoid double counting. Shopify/TikTok payout deposits are not counted here because paid order rows carry platform revenue.</p>
                 </div>
                 <span class="tag">{{ bank_expense_data["row_count"] }} rows</span>
+{% if bank_expense_data and bank_expense_data.get('reconciliation_warnings') %}<div role="alert">Unresolved bank/Discord overlap: bank-only purchases may also appear in Discord inventory totals. Combined purchase totals are provisional. Review the candidate links in the ledger; no payment identity has been assumed. Rows: {% for warning in bank_expense_data['reconciliation_warnings'] %}{{ warning.id }} {% endfor %}</div>{% endif %}
 {% if bank_expense_data.get('allocation_errors') %}<div role="alert">Bank allocation errors: affected rows use their full unsplit cash amounts under Uncategorized; totals are provisional. Correct in the ledger. {% for error in bank_expense_data['allocation_errors'] %}Row {{ error.id }}: {{ error.error }} {% endfor %}</div>{% endif %}
             </div>
             <div class="quick-row" style="justify-content:flex-start; margin-bottom:16px;">

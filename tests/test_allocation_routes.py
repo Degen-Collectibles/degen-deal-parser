@@ -46,3 +46,11 @@ def test_split_export_uses_parts_and_bookkeeping_route_blocks_overwrite():
         with patch('app.routers.bookkeeping.require_role_response',return_value=None):
             result=bank_reconciliation_row_status_form(request(),1,import_id=1,review_status='open',classification='logged_in_discord_strong',expense_category='',note='',session=s)
         assert result.status_code==400 and row.classification!='logged_in_discord_strong'
+
+
+def test_discord_edit_rejects_bank_only_employee_categories():
+    from app.routers.ledger import ledger_transaction_edit_form
+    for category in ['employee_advances','employee_reimbursements']:
+        with patch('app.routers.ledger.require_role_response',return_value=None):
+            response=ledger_transaction_edit_form(request(),1,expense_category=category,session=None)
+        assert response.status_code==400
