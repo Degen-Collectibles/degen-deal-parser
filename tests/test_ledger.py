@@ -1185,6 +1185,7 @@ def test_ledger_export_xlsx_downloads_excel_with_editable_ledger_rows():
         "match_reason",
         "review_status",
         "review_note",
+        "allocations_json",
     ]
     values_by_row_id = {sheet.cell(row=row_index, column=1).value: row_index for row_index in range(2, sheet.max_row + 1)}
     bank_row = values_by_row_id[13]

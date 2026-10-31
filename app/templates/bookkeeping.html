@@ -156,6 +156,9 @@
                 </div>
 
                 {% if reconciliation %}
+                {% if reconciliation["summary"].get("excluded_summary_rows", 0) %}
+                <p class="mini">{{ reconciliation["summary"]["excluded_summary_rows"] }} summary/calculation rows retained for audit and excluded from transaction matching and totals.</p>
+                {% endif %}
                 <div class="summary-grid">
                     <div class="metric"><div class="metric-label">Imported Rows</div><div class="metric-value">{{ reconciliation["summary"]["import_rows"] }}</div></div>
                     <div class="metric"><div class="metric-label">Matched</div><div class="metric-value">{{ reconciliation["summary"]["matched_exact"] }}</div></div>

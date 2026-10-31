@@ -533,6 +533,7 @@ class BankTransaction(SQLModel, table=True):
     match_override_by: Optional[str] = Field(default=None, index=True)
     review_status: str = Field(default="open", index=True)
     review_note: Optional[str] = None
+    allocations_json: str = "[]"
     provider_transaction_id: Optional[str] = Field(default=None, index=True)
     pending: bool = Field(default=False, index=True)
     pending_transaction_id: Optional[str] = Field(default=None, index=True)

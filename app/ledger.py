@@ -366,12 +366,25 @@ def _bank_row_accounting_note(
 
 
 def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) -> dict[str, Any]:
+    from .bank_allocations import bank_allocations, EMPLOYEE_CATEGORIES
+    allocation_error = ""
+    try:
+        allocations = bank_allocations(row)
+    except ValueError as exc:
+        allocations = []
+        allocation_error = str(exc)
     source = ledger_source_for_bank_row(row)
     status = ledger_status_for_bank_row(row)
     action_reason = ledger_action_reason_for_bank_row(row)
     category = row.expense_category or "uncategorized"
     return {
         "row_kind": "bank",
+        "allocation_error": allocation_error,
+        "allocations_json": row.allocations_json or "[]",
+        "allocations": [{**part, "amount_display": format_ledger_money(part["amount_cents"] / 100),
+                         "category_label": expense_category_label(part["category"])} for part in allocations],
+        "employee_allocation": sum(part["amount_cents"] for part in allocations if part["category"] in EMPLOYEE_CATEGORIES) / 100,
+        "allocation_estimated": any(part.get("estimated") for part in allocations),
         "id": row.id,
         "row_index": row.row_index,
         "posted_at": row.posted_at,
@@ -386,7 +399,7 @@ def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) 
         "classification_label": classification_label(row.classification or ""),
         "confidence": row.confidence,
         "expense_category": category,
-        "expense_category_label": expense_category_label(category),
+        "expense_category_label": ("Allocation needs correction" if allocation_error else "Split allocation" if allocations else expense_category_label(category)),
         "expense_subcategory": row.expense_subcategory or "",
         "category_confidence": row.category_confidence,
         "category_reason": row.category_reason or "",
@@ -778,8 +791,14 @@ def _row_matches_filters(row: BankTransaction, filters: LedgerFilters) -> bool:
     if end and (posted is None or posted > end):
         return False
     category = (filters.category or "").strip()
-    if category and category != (row.expense_category or "uncategorized"):
-        return False
+    if category:
+        from .bank_allocations import bank_allocations
+        try:
+            categories = {p["category"] for p in bank_allocations(row)} or {row.expense_category or "uncategorized"}
+        except ValueError:
+            categories = {"uncategorized"}
+        if category not in categories:
+            return False
     source = (filters.source or "").strip()
     if source and source != ledger_source_for_bank_row(row):
         return False
@@ -912,6 +931,8 @@ def _ledger_agent_false_discord_reason(row: BankTransaction, matched: Optional[T
 
 
 def _ledger_agent_safe_review_candidate(row: BankTransaction) -> bool:
+    if (row.allocations_json or "[]") != "[]":
+        return False
     safe_category = row.expense_category in LEDGER_AGENT_AUTO_REVIEW_CATEGORIES
     safe_confidence = (row.category_confidence or "").lower() in LEDGER_AGENT_REVIEW_CONFIDENCES
     return row.review_status == "open" and not row.matched_transaction_id and safe_category and safe_confidence
@@ -1117,6 +1138,11 @@ def apply_ledger_automation(
 
 
 def _set_category_from_payload(row: BankTransaction, payload: dict[str, str]) -> None:
+    if (row.allocations_json or "[]") != "[]":
+        return
+    from .bank_allocations import EMPLOYEE_CATEGORIES
+    if payload.get("expense_category") in EMPLOYEE_CATEGORIES:
+        return
     row.expense_category = payload.get("expense_category") or row.expense_category or "uncategorized"
     row.expense_subcategory = payload.get("expense_subcategory") or None
     row.category_confidence = payload.get("category_confidence") or row.category_confidence or "low"
@@ -1751,8 +1777,14 @@ def row_matches_rule(row: BankTransaction, conditions: dict[str, Any]) -> bool:
     if classification and classification != (row.classification or ""):
         return False
     category = str(conditions.get("category") or "").strip()
-    if category and category != (row.expense_category or "uncategorized"):
-        return False
+    if category:
+        from .bank_allocations import bank_allocations
+        try:
+            categories = {p["category"] for p in bank_allocations(row)} or {row.expense_category or "uncategorized"}
+        except ValueError:
+            categories = {"uncategorized"}
+        if category not in categories:
+            return False
     provider = str(conditions.get("provider") or "").strip().lower()
     if provider and provider not in description_text and provider != ledger_source_for_bank_row(row):
         return False
@@ -1857,11 +1889,16 @@ def apply_ledger_rule(
 ) -> dict[str, Any]:
     conditions = _as_dict(rule.conditions_json)
     actions = _as_dict(rule.actions_json)
+    from .bank_allocations import EMPLOYEE_CATEGORIES
+    if actions.get("category") in EMPLOYEE_CATEGORIES:
+        raise ValueError("Employee categories require an audited allocation, not a bulk rule.")
     selected = filters or LedgerFilters(status="all")
     rows = [row for row in _load_bank_rows(session) if _row_matches_filters(row, selected) and row_matches_rule(row, conditions)]
     now = utcnow()
     updated = 0
     for row in rows:
+        if (row.allocations_json or "[]") != "[]":
+            continue  # Explicit splits are only editable through the allocation flow.
         before = _bank_row_audit_snapshot(row)
         changed = False
         category = str(actions.get("category") or "").strip()

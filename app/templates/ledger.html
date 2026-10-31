@@ -309,6 +309,9 @@
         details { margin-top: 8px; color: var(--muted); }
         summary { cursor: pointer; color: #dbeafe; font-weight: 800; }
         .inline-form { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(130px, 1fr) auto; gap: 8px; align-items: end; min-width: 320px; margin-top: 8px; }
+        .allocation-form { grid-template-columns: 1fr; min-width: 300px; max-width: 380px; color: #e7edf4; }
+        .allocation-form label { color: #c5ceda; }
+        .allocation-form input:not([type="checkbox"]), .allocation-form select { display:block; width:100%; box-sizing:border-box; background:#181d26; color:#edf2f7; border:1px solid #566273; padding:8px; }
         .transaction-edit-form {
             grid-template-columns: minmax(96px, .75fr) minmax(88px, .6fr) minmax(96px, .7fr) minmax(150px, 1fr) auto;
             min-width: 620px;
@@ -679,6 +682,10 @@
                                             <div class="mini">Classification: {{ row.classification_label }}</div>
                                             {% if row.category_reason %}<div class="mini">Category: {{ row.category_reason }}</div>{% endif %}
                                             {% if row.review_note %}<div class="mini">Note: {{ row.review_note }}</div>{% endif %}
+                                            {% for part in row.allocations|default([]) %}
+                                            <div class="mini"><strong>{{ part.category_label }}: {{ part.amount_display }}</strong>{% if part.estimated %} (estimated){% endif %} — {{ part.note }}</div>
+                                            {% endfor %}
+                                            {% if row.allocation_error %}<div role="alert">Allocation needs correction: {{ row.allocation_error }}</div>{% endif %}
                                             {% if row.match_override_note %}<div class="mini">Override: {{ row.match_override_note }}</div>{% endif %}
                                         </div>
                                     </td>
@@ -746,6 +753,20 @@
                                     </td>
                                     <td data-label="Review">
                                         {% if row.row_kind == "bank" %}
+                                        <details><summary>Employee reimbursement split</summary>
+                                            <form method="post" action="/ledger/rows/{{ row.id }}/allocation-form" class="inline-form allocation-form">
+                                                <label>Employee share ($)<input name="employee_amount" type="number" min="0" step="0.01" value="{{ row.employee_allocation }}" required></label>
+                                                <label>Business remainder category<select name="business_category">
+                                                    {% for choice in category_choices %}{% if choice.value not in ['employee_advances', 'employee_reimbursements'] %}
+                                                    <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
+                                                    {% endif %}{% endfor %}
+                                                </select></label>
+                                                <label><input name="estimated" type="checkbox" value="true" {% if row.allocation_estimated %}checked{% endif %}> Estimated allocation</label>
+                                                <label>Evidence / reimbursement reference<input name="note" required maxlength="2000"></label>
+                                                <div class="mini">Preserves the full bank amount. Employee receipts are not sales. Enter zero to clear the split. This does not confirm an unpaid balance. If also logged in Discord, correct or exclude that expense/receipt there first; unlinking alone can double-count it. CSV/XLSX exports use one row per split part.</div>
+                                                <button class="tiny primary" type="submit">Save allocation</button>
+                                            </form>
+                                        </details>
                                         <form method="post" action="/ledger/rows/{{ row.id }}/status-form" class="inline-form" data-row-edit-form>
                                             <input type="hidden" name="selected_account" value="{{ selected.account }}">
                                             <input type="hidden" name="selected_start" value="{{ selected.start }}">
@@ -807,7 +828,7 @@
                                             </label>
                                             <label>Category
                                                 <select name="expense_category">
-                                                    {% for choice in category_choices %}
+                                                    {% for choice in category_choices if choice.value not in ["employee_advances", "employee_reimbursements"] %}
                                                     <option value="{{ choice.value }}" {% if row.expense_category == choice.value %}selected{% endif %}>{{ choice.label }}</option>
                                                     {% endfor %}
                                                 </select>
@@ -1090,7 +1111,7 @@
 
         document.addEventListener("click", function (event) {
             var target = event.target;
-            if (target.closest("button, a, input, select, textarea, label, form")) return;
+            if (target.closest("button, a, input, select, textarea, label, form, summary")) return;
             var row = target.closest("tr[data-ledger-row-id]");
             if (row) toggleRow(row);
         });

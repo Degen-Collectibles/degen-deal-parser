@@ -154,7 +154,7 @@ def _bank_row_view(row: BankTransaction, matched_transaction: Optional[Transacti
     return {
         "row": row,
         "classification_label": classification_label(row.classification),
-        "expense_category_label": expense_category_label(row.expense_category or "uncategorized"),
+        "expense_category_label": ("Allocation: see ledger" if (row.allocations_json or "[]") != "[]" else expense_category_label(row.expense_category or "uncategorized")),
         "needs_attention": row.classification in ATTENTION_CLASSIFICATIONS and row.review_status == "open",
         "matched_transaction": matched_transaction,
         "action_links": action_links,
@@ -794,6 +794,13 @@ def bank_reconciliation_row_status_form(
         return denial
     row = session.get(BankTransaction, row_id)
     if row:
+        from ..bank_allocations import EMPLOYEE_CATEGORIES
+        from ..financial_audit import record_financial_audit
+        if expense_category in EMPLOYEE_CATEGORIES:
+            return JSONResponse({"error": "Use the audited employee allocation form in the ledger."}, status_code=400)
+        if (row.allocations_json or "[]") != "[]" and (classification or (expense_category and expense_category != row.expense_category)):
+            return JSONResponse({"error": "Edit or clear the allocation in the ledger first."}, status_code=400)
+        before = row.model_dump(mode="json")
         if classification:
             row.classification = classification
         if expense_category:
@@ -806,6 +813,8 @@ def bank_reconciliation_row_status_form(
         row.review_note = (note or "").strip() or None
         row.updated_at = utcnow()
         session.add(row)
+        record_financial_audit(session, action="financial.bank.row_edit", resource_key=f"bank_transactions:{row.id}",
+            before=before, after=row.model_dump(mode="json"), actor_label=current_user_label(request), note=(note or "").strip())
         session.commit()
         invalidate_financial_report_caches()
     return RedirectResponse(
@@ -877,7 +886,10 @@ def bank_reconciliation_export_csv(
             "review_note",
         ]
     )
-    for row in rows:
+    from ..bank_allocations import expand_bank_allocations
+    for row in expand_bank_allocations(rows, errors=[]):
+        if expense_category and (row.expense_category or "uncategorized") != expense_category:
+            continue
         writer.writerow(
             [
                 escape_spreadsheet_text(value)
@@ -885,7 +897,7 @@ def bank_reconciliation_export_csv(
                     row.row_index,
                     row.posted_at.date().isoformat() if row.posted_at else "",
                     row.account_label,
-                    f"{float(row.amount or 0.0):.2f}",
+                    round(float(row.amount or 0.0), 2),
                     row.expense_category or "uncategorized",
                     expense_category_label(row.expense_category or "uncategorized"),
                     row.expense_subcategory or "",
