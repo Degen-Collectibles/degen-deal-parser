@@ -14,6 +14,7 @@ from sqlmodel import Session, delete, select
 from ..models import BankFeedAccount, BankStatementImport, BankTransaction, Transaction, normalize_money_value, utcnow
 from .transactions import transaction_base_query
 from ..bank_allocations import expand_bank_allocations
+from ..bank_overlap import overlap_warning_note
 
 
 CLASSIFICATION_LABELS = {
@@ -1377,8 +1378,8 @@ def get_bank_transactions(
 
 
 def bank_reconciliation_warnings(rows):
-    return [{"id": getattr(row, "id", None), "note": row.match_override_note}
-            for row in rows if "[unresolved-discord-overlap]" in (getattr(row, "match_override_note", None) or "")]
+    return [{"id": getattr(row, "id", None), "note": note}
+            for row in rows if (note := overlap_warning_note(row))]
 
 
 def summarize_bank_transactions(rows: list[BankTransaction]) -> dict[str, Any]:

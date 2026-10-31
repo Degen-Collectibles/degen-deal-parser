@@ -291,6 +291,8 @@ SQLITE_ADDITIVE_MIGRATIONS = {
     },
     "bank_transactions": {
         "allocations_json": "TEXT DEFAULT '[]'",
+        "discord_overlap_unresolved": "BOOLEAN DEFAULT 0",
+        "discord_overlap_note": "TEXT",
         "expense_category": "TEXT DEFAULT 'uncategorized'",
         "expense_subcategory": "TEXT",
         "category_confidence": "TEXT DEFAULT 'low'",
@@ -780,6 +782,8 @@ POSTGRES_ADDITIVE_MIGRATIONS = {
     },
     "bank_transactions": {
         "allocations_json": "TEXT DEFAULT '[]'",
+        "discord_overlap_unresolved": "BOOLEAN DEFAULT FALSE",
+        "discord_overlap_note": "TEXT",
         "expense_category": "TEXT DEFAULT 'uncategorized'",
         "expense_subcategory": "TEXT",
         "category_confidence": "TEXT DEFAULT 'low'",
@@ -1946,6 +1950,11 @@ def init_db() -> None:
             delay_seconds *= 2
     ensure_postgres_schema()
     ensure_sqlite_schema()
+    # Fail startup rather than allow legacy evidence to be lost by a note edit.
+    from .bank_overlap import migrate_legacy_discord_overlaps
+    with Session(engine) as session:
+        migrate_legacy_discord_overlaps(session)
+        session.commit()
     try:
         from .loyalty.schema import install_schema
         install_schema(engine)
