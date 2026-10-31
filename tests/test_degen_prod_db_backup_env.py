@@ -507,8 +507,11 @@ def test_parent_binding_rejects_descriptor_different_from_preopen_lstat(
 ) -> None:
     named = directory_metadata()
     opened = SimpleNamespace(**{**vars(named), "st_ino": named.st_ino + 1})
-    monkeypatch.setattr(module.os, "fstat", lambda fd: opened)
-    monkeypatch.setattr(module.os, "lstat", lambda path: opened)
+    # Keep synthetic metadata inside the module: patching the shared os module
+    # also replaces fstat for pytest's capture files, which need full stat data.
+    fake_os = SimpleNamespace(**{**vars(module.os), "fstat": lambda fd: opened,
+                                 "lstat": lambda path: opened})
+    monkeypatch.setattr(module, "os", fake_os)
 
     with pytest.raises(RuntimeError, match="parent path changed"):
         module._validate_parent_binding(
