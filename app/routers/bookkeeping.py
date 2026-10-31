@@ -888,7 +888,7 @@ def bank_reconciliation_export_csv(
     )
     from ..bank_allocations import expand_bank_allocations
     for row in expand_bank_allocations(rows, errors=[]):
-        if expense_category and row.expense_category != expense_category:
+        if expense_category and (row.expense_category or "uncategorized") != expense_category:
             continue
         writer.writerow(
             [

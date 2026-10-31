@@ -210,3 +210,17 @@ def test_bank_category_filter_finds_employee_and_business_parts():
             assert [r.id for r in found]==[row.id]
             assert found[0].amount==-3410.37
         assert get_bank_transactions(s,import_id=1,expense_category='payroll')==[]
+
+
+def test_finance_account_filter_and_ops_keep_global_overlap_warning():
+    from app.ops_agent import _build_loan_snapshot
+    e=create_engine('sqlite:///:memory:');SQLModel.metadata.create_all(e)
+    with Session(e) as s:
+        s.add(BankStatementImport(id=1,label='test',account_label='checking'))
+        row=bank(match_override_note='[unresolved-discord-overlap] Candidate 99')
+        s.add(row);s.commit()
+        dates=dict(start=datetime(2026,9,1),end=datetime(2026,9,30))
+        filtered=build_finance_bank_expense_data(s,account_filter='credit_card',**dates)
+        assert filtered['gross_outflow_total']==0 and filtered['row_count']==0
+        assert [w['id'] for w in filtered['reconciliation_warnings']]==[row.id]
+        assert [w['id'] for w in _build_loan_snapshot(s,**dates)['reconciliation_warnings']]==[row.id]

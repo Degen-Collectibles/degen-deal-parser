@@ -1511,13 +1511,14 @@ def build_finance_bank_expense_data(
         .where(BankTransaction.posted_at >= start)
         .where(BankTransaction.posted_at <= end)
     )
-    if selected_account != "all":
-        stmt = stmt.where(BankTransaction.account_type == selected_account)
     rows = dedupe_bank_rows_for_reporting([row for row in session.exec(stmt).all() if not row.is_removed and not row.pending])
-    cash_row_count = len(rows)
+    # Headline finance totals cover every account, even when bank detail is filtered.
     reconciliation_warnings = bank_reconciliation_warnings(rows)
+    cash_row_count = sum(1 for row in rows if selected_account == "all" or row.account_type == selected_account)
     allocation_errors = []
     rows = expand_bank_allocations(rows, errors=allocation_errors)
+    if selected_account != "all":
+        rows = [row for row in rows if row.account_type == selected_account]
 
     category_totals: dict[str, dict[str, Any]] = {}
     account_totals: dict[str, dict[str, Any]] = {}

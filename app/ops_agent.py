@@ -749,7 +749,10 @@ def _build_loan_snapshot(session: Session, *, start: datetime, end: datetime) ->
     ).all()
     from .bank_allocations import expand_bank_allocations
     allocation_errors = []
-    rows = expand_bank_allocations(dedupe_bank_rows_for_reporting([r for r in rows if not r.pending]), errors=allocation_errors)
+    from .discord.bank_reconciliation import bank_reconciliation_warnings
+    rows = dedupe_bank_rows_for_reporting([r for r in rows if not r.pending])
+    reconciliation_warnings = bank_reconciliation_warnings(rows)
+    rows = expand_bank_allocations(rows, errors=allocation_errors)
     loan_proceeds = 0.0
     paybacks = 0.0
     platform_payouts = 0.0
@@ -765,6 +768,7 @@ def _build_loan_snapshot(session: Session, *, start: datetime, end: datetime) ->
             platform_payouts += abs(amount)
     return {
         "allocation_errors": allocation_errors,
+        "reconciliation_warnings": reconciliation_warnings,
         "observed_loan_proceeds": round(loan_proceeds, 2),
         "observed_paybacks": round(paybacks, 2),
         "observed_platform_payouts": round(platform_payouts, 2),
