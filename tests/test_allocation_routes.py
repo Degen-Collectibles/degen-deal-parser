@@ -43,6 +43,14 @@ def test_split_export_uses_parts_and_bookkeeping_route_blocks_overwrite():
         parts=[dict(zip(LEDGER_EXPORT_COLUMNS,r)) for r in rows]
         assert sum(r['amount'] for r in parts)==-100
         assert {r['category']:r['amount'] for r in parts}=={'employee_advances':-25,'grading_fees':-75}
+        filtered=_ledger_export_rows(s,LedgerFilters(status='all',category='employee_advances'))
+        assert len(filtered)==1 and dict(zip(LEDGER_EXPORT_COLUMNS,filtered[0]))['amount']==-25
+        import csv,io
+        from app.routers.bookkeeping import bank_reconciliation_export_csv
+        with patch('app.routers.bookkeeping.require_role_response',return_value=None):
+            export=bank_reconciliation_export_csv(request(),import_id=1,expense_category='employee_advances',session=s)
+        bank_parts=list(csv.DictReader(io.StringIO(export.body.decode())))
+        assert len(bank_parts)==1 and float(bank_parts[0]['amount'])==-25
         with patch('app.routers.bookkeeping.require_role_response',return_value=None):
             result=bank_reconciliation_row_status_form(request(),1,import_id=1,review_status='open',classification='logged_in_discord_strong',expense_category='',note='',session=s)
         assert result.status_code==400 and row.classification!='logged_in_discord_strong'

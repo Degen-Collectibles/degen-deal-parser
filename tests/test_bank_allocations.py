@@ -196,3 +196,17 @@ def test_unmatched_candidate_overlap_is_visible_in_finance_summary():
     result=summarize_bank_transactions([row])
     assert len(result['reconciliation_warnings'])==1
     assert result['debits']==-3410.37
+
+
+def test_bank_category_filter_finds_employee_and_business_parts():
+    from app.discord.bank_reconciliation import get_bank_transactions
+    e=create_engine('sqlite:///:memory:');SQLModel.metadata.create_all(e)
+    with Session(e) as s:
+        s.add(BankStatementImport(id=1,label='test',account_label='checking'))
+        row=bank();s.add(row);s.commit()
+        set_employee_allocation(s,row,employee_amount='852.59',business_category='grading_fees',estimated=True,note='test',actor_label='reviewer');s.commit()
+        for category in ['employee_advances','grading_fees']:
+            found=get_bank_transactions(s,import_id=1,expense_category=category)
+            assert [r.id for r in found]==[row.id]
+            assert found[0].amount==-3410.37
+        assert get_bank_transactions(s,import_id=1,expense_category='payroll')==[]

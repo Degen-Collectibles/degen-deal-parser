@@ -154,7 +154,7 @@ def _bank_row_view(row: BankTransaction, matched_transaction: Optional[Transacti
     return {
         "row": row,
         "classification_label": classification_label(row.classification),
-        "expense_category_label": expense_category_label(row.expense_category or "uncategorized"),
+        "expense_category_label": ("Allocation: see ledger" if (row.allocations_json or "[]") != "[]" else expense_category_label(row.expense_category or "uncategorized")),
         "needs_attention": row.classification in ATTENTION_CLASSIFICATIONS and row.review_status == "open",
         "matched_transaction": matched_transaction,
         "action_links": action_links,
@@ -888,6 +888,8 @@ def bank_reconciliation_export_csv(
     )
     from ..bank_allocations import expand_bank_allocations
     for row in expand_bank_allocations(rows, errors=[]):
+        if expense_category and row.expense_category != expense_category:
+            continue
         writer.writerow(
             [
                 escape_spreadsheet_text(value)
@@ -895,7 +897,7 @@ def bank_reconciliation_export_csv(
                     row.row_index,
                     row.posted_at.date().isoformat() if row.posted_at else "",
                     row.account_label,
-                    f"{float(row.amount or 0.0):.2f}",
+                    round(float(row.amount or 0.0), 2),
                     row.expense_category or "uncategorized",
                     expense_category_label(row.expense_category or "uncategorized"),
                     row.expense_subcategory or "",

@@ -1350,7 +1350,8 @@ def get_bank_transactions(
     if classification:
         rows = [row for row in rows if row.classification == classification]
     if expense_category:
-        rows = [row for row in rows if (row.expense_category or "uncategorized") == expense_category]
+        rows = [row for row in rows if any((part.expense_category or "uncategorized") == expense_category
+               for part in expand_bank_allocations([row], errors=[]))]
     if expenses_only:
         rows = [row for row in rows if float(row.amount or 0.0) < 0]
     if review_status:

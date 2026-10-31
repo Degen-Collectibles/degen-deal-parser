@@ -140,6 +140,8 @@ def _ledger_export_rows(session: Session, filters: LedgerFilters) -> list[list[o
         parts = original.get("allocations") or []
         if parts and not original.get("allocation_error"):
             for part in parts:
+                if filters.category and part["category"] != filters.category:
+                    continue
                 export_rows.append({**original, "amount": (-1 if original["amount"] < 0 else 1) * part["amount_cents"] / 100,
                                     "expense_category": part["category"]})
         else:
