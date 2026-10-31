@@ -529,6 +529,9 @@ class BankTransaction(SQLModel, table=True):
     matched_platform: Optional[str] = Field(default=None, index=True)
     match_override_status: Optional[str] = Field(default=None, index=True)
     match_override_note: Optional[str] = None
+    # Evidence exception, independent of editable matching/review notes.
+    discord_overlap_unresolved: bool = False
+    discord_overlap_note: Optional[str] = None
     match_override_at: Optional[datetime] = Field(default=None, index=True)
     match_override_by: Optional[str] = Field(default=None, index=True)
     review_status: str = Field(default="open", index=True)

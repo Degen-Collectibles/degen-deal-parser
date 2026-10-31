@@ -687,6 +687,7 @@
                                             {% endfor %}
                                             {% if row.allocation_error %}<div role="alert">Allocation needs correction: {{ row.allocation_error }}</div>{% endif %}
                                             {% if row.match_override_note %}<div class="mini">Override: {{ row.match_override_note }}</div>{% endif %}
+                                            {% if row.discord_overlap_warning %}<div role="alert">Unresolved bank/Discord overlap: {{ row.discord_overlap_warning }} Editing notes, matching, or allocating this row does not resolve this evidence exception.</div>{% endif %}
                                         </div>
                                     </td>
                                     <td data-label="Link">

@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 
 from .ai_client import get_ai_client, get_fast_model, has_ai_key
 from .financial_audit import record_financial_audit
+from .bank_overlap import overlap_warning_note, set_reconciliation_note, validate_reconciliation_note
 from .discord.bank_reconciliation import (
     ATTENTION_CLASSIFICATIONS,
     HIGH_CONFIDENCE_CLASSIFICATIONS,
@@ -408,6 +409,7 @@ def _bank_row_view(row: BankTransaction, matched: Optional[Transaction] = None) 
         "match_reason": row.match_reason or "",
         "match_override_status": row.match_override_status or "",
         "match_override_note": row.match_override_note or "",
+        "discord_overlap_warning": overlap_warning_note(row),
         "matched_transaction_id": row.matched_transaction_id,
         "matched_source_message_id": row.matched_source_message_id,
         "matched_platform": row.matched_platform or "",
@@ -1892,6 +1894,7 @@ def apply_ledger_rule(
     from .bank_allocations import EMPLOYEE_CATEGORIES
     if actions.get("category") in EMPLOYEE_CATEGORIES:
         raise ValueError("Employee categories require an audited allocation, not a bulk rule.")
+    validate_reconciliation_note(str(actions.get("note") or rule.description or rule.name))
     selected = filters or LedgerFilters(status="all")
     rows = [row for row in _load_bank_rows(session) if _row_matches_filters(row, selected) and row_matches_rule(row, conditions)]
     now = utcnow()
@@ -1920,7 +1923,7 @@ def apply_ledger_rule(
         if match_override and match_override in RULE_ALLOWED_MATCH_OVERRIDES:
             if match_override == "force_unmatched":
                 row.match_override_status = "force_unmatched"
-                row.match_override_note = str(actions.get("note") or rule.description or rule.name).strip() or None
+                set_reconciliation_note(session, row, str(actions.get("note") or rule.description or rule.name).strip() or None, actor_label=applied_by or "system")
                 row.match_override_at = now
                 row.match_override_by = applied_by or None
                 row.matched_transaction_id = None
@@ -1930,7 +1933,7 @@ def apply_ledger_rule(
                 changed = True
             elif row.match_override_status:
                 row.match_override_status = None
-                row.match_override_note = None
+                set_reconciliation_note(session, row, None, actor_label=applied_by or "system")
                 row.match_override_at = None
                 row.match_override_by = None
                 changed = True

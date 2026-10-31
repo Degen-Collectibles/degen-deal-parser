@@ -599,13 +599,18 @@ def ledger_row_force_unmatch_form(
             if (row.allocations_json or "[]") != "[]":
                 return JSONResponse({"error": "Clear the allocation before enabling automatic matching."}, status_code=400)
             row.match_override_status = None
-            row.match_override_note = None
+            from ..bank_overlap import set_reconciliation_note
+            set_reconciliation_note(session, row, None, actor_label=current_user_label(request))
             row.match_override_at = None
             row.match_override_by = None
             success = "Cleared match override"
         else:
+            from ..bank_overlap import set_reconciliation_note
+            try:
+                set_reconciliation_note(session, row, (note or "").strip() or "Forced unmatched from the ledger.", actor_label=current_user_label(request))
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
             row.match_override_status = "force_unmatched"
-            row.match_override_note = (note or "").strip() or "Forced unmatched from the ledger."
             row.match_override_at = utcnow()
             row.match_override_by = current_user_label(request)
             row.matched_transaction_id = None
@@ -1014,7 +1019,10 @@ def ledger_rule_apply_form(
         direction=selected_direction,
         include_cash=selected_include_cash,
     )
-    result = apply_ledger_rule(session, rule, filters=filters, applied_by=current_user_label(request))
+    try:
+        result = apply_ledger_rule(session, rule, filters=filters, applied_by=current_user_label(request))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     return RedirectResponse(
         url=_ledger_redirect_url(
             account=selected_account,

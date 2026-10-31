@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 
 from .models import BankTransaction, utcnow
 from .financial_audit import record_financial_audit
+from .bank_overlap import set_reconciliation_note, validate_reconciliation_note
 
 EMPLOYEE_CATEGORIES = {"employee_advances", "employee_reimbursements"}
 
@@ -91,6 +92,7 @@ def _set_employee_allocation_one(session, row: BankTransaction, *, employee_amou
         raise ValueError("Choose the category for the business remainder.")
     if not note.strip():
         raise ValueError("An evidence or allocation note is required.")
+    validate_reconciliation_note(note)
     before = row.model_dump(mode="json")
     parts = []
     if cents:
@@ -104,7 +106,7 @@ def _set_employee_allocation_one(session, row: BankTransaction, *, employee_amou
     row.category_confidence = "manual"
     row.category_reason = "Manual allocation: " + note.strip()
     row.match_override_status = "force_unmatched"
-    row.match_override_note = "Manual split; bank allocations are the reporting source. " + note.strip()
+    set_reconciliation_note(session, row, "Manual split; bank allocations are the reporting source. " + note.strip(), actor_label=actor_label)
     row.match_override_at = utcnow()
     row.match_override_by = actor_label
     if not row.matched_transaction_id:
