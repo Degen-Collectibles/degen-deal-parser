@@ -8,6 +8,26 @@ from .models import TABLES
 def install_schema(engine):
     SQLModel.metadata.create_all(engine, tables=TABLES)
     with engine.begin() as connection:
+        if engine.dialect.name == 'postgresql':
+            connection.execute(text('SELECT pg_advisory_xact_lock(7301202604)'))
+        # Existing DEV reservations survive the additive reconciliation upgrade.
+        columns = {c['name'] for c in inspect(connection).get_columns('loyalty_redemption')}
+        if 'evidence_json' not in columns:
+            connection.execute(text("ALTER TABLE loyalty_redemption ADD COLUMN evidence_json TEXT NOT NULL DEFAULT '{}'"))
+        if 'eligibility_json' not in columns:
+            connection.execute(text("ALTER TABLE loyalty_redemption ADD COLUMN eligibility_json TEXT NOT NULL DEFAULT '{}'"))
+        if 'failure_count' not in columns:
+            connection.execute(text('ALTER TABLE loyalty_redemption ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0'))
+        for name, definition in {
+            'observed_order_json': "TEXT NOT NULL DEFAULT '{}'",
+            'manual_decision_hash': "VARCHAR(64) NOT NULL DEFAULT ''",
+            'work_generation': 'INTEGER NOT NULL DEFAULT 0',
+            'acknowledged_generation': 'INTEGER NOT NULL DEFAULT 0',
+            'review_cause': "VARCHAR(100) NOT NULL DEFAULT ''",
+            'resolved_evidence_hash': "VARCHAR(64) NOT NULL DEFAULT ''",
+        }.items():
+            if name not in columns:
+                connection.execute(text(f'ALTER TABLE loyalty_redemption ADD COLUMN {name} {definition}'))
         if engine.dialect.name == 'sqlite':
             for action in ('UPDATE','DELETE'):
                 connection.execute(text(f"CREATE TRIGGER IF NOT EXISTS loyalty_ledger_no_{action.lower()} BEFORE {action} ON loyalty_ledger BEGIN SELECT RAISE(ABORT, 'loyalty_ledger_append_only'); END"))

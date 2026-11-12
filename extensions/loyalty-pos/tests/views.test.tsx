@@ -177,7 +177,7 @@ test.each(['userId','locationId','shopDomain'])('session %s switch hides old dat
 });
 
 test.each([
-  {balance_points:19},{balance_points:'19.5'},{balance_points:'-1'},{history:[null]},
+  {balance_points:19},{balance_points:'19.5'},{balance_points:'--1'},{history:[null]},
   {history:[{delta_points:'1.5',label:'Purchase points',created_at:'2026-09-10'}]},
   {history:[{delta_points:'20',label:'Unexpected private evidence',created_at:'2026-09-10'}]},
   {as_of:'invalid'},{needs_review:'false'},{customer_id:'other-customer'},
@@ -186,4 +186,13 @@ test.each([
   render(<LoyaltyView api={api} mode="history"/>);await screen.findByText('19 points');fireEvent.click(screen.getByText('Refresh'));
   await screen.findByText('Loyalty is unavailable. Try again when connected.');
   expect(screen.queryByText('19 points')).toBeNull();expect(screen.queryByText('0 points')).toBeNull();expect(screen.queryByText('Refund adjustment')).toBeNull();
+});
+
+
+test('negative balance remains visible with review status',async()=>{
+  const {api}=fixture();vi.stubGlobal('fetch',()=>reply({...body('101','-410'),needs_review:true}));
+  render(<LoyaltyView api={api} mode="history"/>);
+  expect(await screen.findByText('-410 points')).toBeTruthy();
+  expect(screen.getByText('Order needs review')).toBeTruthy();
+  expect(screen.queryByText('Activity changed. Refresh to load the latest points.')).toBeNull();
 });

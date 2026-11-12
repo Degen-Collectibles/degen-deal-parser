@@ -530,6 +530,8 @@ async def lifespan(app: FastAPI):
 
     from .loyalty.worker import start_loyalty_task
     start_loyalty_task(app, stop_event, background_tasks, settings)
+    from .loyalty.redemption_worker import start_redemption_task
+    start_redemption_task(app, stop_event, background_tasks, settings)
 
     if settings.employee_portal_enabled and settings.sms_dispatcher_enabled:
         from .team.sms_outbox import sms_dispatch_loop
@@ -616,6 +618,8 @@ from .routers.loyalty import router as loyalty_router
 from .routers.shopify_loyalty_webhooks import router as shopify_loyalty_webhooks_router
 from .routers.loyalty_pos import build_router as build_loyalty_pos_router
 app.include_router(build_loyalty_pos_router(engine, settings))
+from .routers.loyalty_redemption import build_router as build_loyalty_redemption_router
+app.include_router(build_loyalty_redemption_router(engine, settings))
 app.include_router(loyalty_router)
 app.include_router(shopify_loyalty_webhooks_router)
 
@@ -902,8 +906,11 @@ def health():
                 runtime_label=APP_RUNTIME_LABEL,
                 updated_at_formatter=format_pacific_datetime,
             )
+        from .loyalty.readiness import ready as loyalty_ready
+        loyalty_ok = loyalty_ready(engine, settings, app.state)
         return HealthOut(
-            ok=bool(db_health["ok"]),
+            loyalty_ready=loyalty_ok,
+            ok=bool(db_health["ok"]) and loyalty_ok,
             db_ok=bool(db_health["ok"]),
             local_runtime_status=local_runtime["status"],
             local_runtime_label=local_runtime["label"],

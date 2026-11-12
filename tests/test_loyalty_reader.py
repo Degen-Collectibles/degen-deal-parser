@@ -26,6 +26,27 @@ def test_projection_exact_allocations_and_no_contacts():
     assert result['lines'][0]['discounts_cents']==[500]
     assert 'private' not in str(result) and 'email' not in str(result)
 
+def test_custom_sale_merchandise_earns_on_paid_amount_without_catalog_variant():
+    from app.loyalty.domain import calculate
+    from test_loyalty_domain import attachment
+    h=head(); l=line(); l['variant']=None
+    l['originalTotalSet']=bag(6000)
+    l['discountAllocations']=[{'allocatedAmountSet':bag(1000)}]
+    result=project_order(h,[l],[],POLICY.shop_id)
+    assert result['lines'][0]['merchandise'] is True
+    assert calculate(result,POLICY,attachment()).points==50
+
+@pytest.mark.parametrize('gift,physical',[(True,True),(True,False),(False,False)])
+def test_custom_sale_does_not_make_gift_cards_or_services_eligible(gift,physical):
+    from app.loyalty.domain import calculate
+    from test_loyalty_domain import attachment
+    l=line();l.update(variant=None,isGiftCard=gift,requiresShipping=physical)
+    result=project_order(head(),[l],[],POLICY.shop_id)
+    if gift:
+        assert calculate(result,POLICY,attachment()).points==0
+    else:
+        assert calculate(result,POLICY,attachment()).points==0
+
 def test_pagination_and_consistency():
     calls=[]
     async def request(query,variables):

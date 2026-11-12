@@ -1,0 +1,16 @@
+client_id = "75c6c90117c95bd9f683cacaf3ed5c51"
+name = "Degen Loyalty Dev"
+application_url = "https://example.com"
+embedded = true
+extension_directories = ["../../extensions/loyalty-pos"]
+web_directories = ["web"]
+[build]
+automatically_update_urls_on_dev = true
+dev_store_url = "degen-loyalty-dev.myshopify.com"
+[access_scopes]
+scopes = "read_customers,read_discounts,read_inventory,read_orders,read_products,read_returns,write_discounts"
+use_legacy_install_flow = false
+[auth]
+redirect_urls = []
+[webhooks]
+api_version = "2026-07"

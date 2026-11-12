@@ -17,6 +17,8 @@ from ..loyalty.models import LoyaltyAccount,LoyaltyEntitlement,LoyaltyInbox,Loya
 from ..loyalty.schema import schema_ready
 from ..loyalty.service import Store
 from ..loyalty import ops
+from ..loyalty.models import LoyaltyRedemption
+from ..loyalty.redemption import Redemptions, RedemptionError
 from .. import shared
 
 settings=get_settings()
@@ -74,10 +76,15 @@ def loyalty_page(request:Request,customer_id:str=Query(default='',max_length=100
         order=gid('Order',order_id) if order_id else None
     except Review:raise HTTPException(400,'use_shopify_customer_or_order_id') from None
     ready=schema_ready(store.engine)
-    history_orders={};rows=[];history=[];inbox=[];scan=None;balance=None;counts=[];can_correct=False;can_replay=False
+    history_orders={};rows=[];history=[];inbox=[];scan=None;balance=None;counts=[];can_correct=False;can_replay=False;rewards=[]
     if ready:
         with Session(store.engine) as s:
             can_correct=has_permission(s,user,'admin.loyalty.correct');can_replay=has_permission(s,user,'admin.loyalty.reconcile')
+            if can_correct or can_replay:
+                reward_query=select(LoyaltyRedemption).where(LoyaltyRedemption.shop==settings.loyalty_shop_domain)
+                if customer:reward_query=reward_query.where(LoyaltyRedemption.customer_id==customer)
+                if order:reward_query=reward_query.where(LoyaltyRedemption.order_id==order)
+                rewards=s.exec(reward_query.order_by(LoyaltyRedemption.id.desc()).offset(page*50).limit(50)).all()
             query=select(LoyaltyEntitlement).where(LoyaltyEntitlement.shop==settings.loyalty_shop_domain)
             if customer:query=query.where(LoyaltyEntitlement.customer_id==customer)
             if order:query=query.where(LoyaltyEntitlement.order_id==order)
@@ -99,11 +106,66 @@ def loyalty_page(request:Request,customer_id:str=Query(default='',max_length=100
     response=shared.templates.TemplateResponse(request=request,name='loyalty.html',context=dict(request=request,current_user=user,title='POS loyalty',
         rows=rows,history=history,history_orders=history_orders,inbox=inbox,scan=scan,balance=balance,counts=counts,customer_id=customer_id,order_id=order_id,
         page=page,gates=gates,receiving=settings.loyalty_receiving_enabled,processing=settings.loyalty_processing_enabled,posting=settings.loyalty_posting_enabled,
-        can_correct=can_correct,can_replay=can_replay,diagnostics=can_correct or can_replay,
+        can_correct=can_correct,can_replay=can_replay,diagnostics=can_correct or can_replay,rewards=rewards,
         evidence_hashes={row.id:fingerprint(json.loads(row.observed_evidence_json)) for row in rows} if can_correct else {},
+        reward_observation_hash=lambda reward:fingerprint(json.loads(reward.observed_order_json)),
+        reward_evidence_hash=lambda reward:fingerprint(json.loads(reward.evidence_json)),
         display_reason=display_reason,display_id=lambda value:value.rsplit('/',1)[-1] if value else 'Unattached',
         display_money=lambda value:f'${value//100:,}.{value%100:02d}',request_key=uuid4().hex,shop=settings.loyalty_shop_domain))
     response.headers['Cache-Control']='no-store';return response
+
+
+@router.post('/loyalty/rewards/release')
+def release_reward(request:Request,redemption_id:int=Form(gt=0),reference:str=Form(max_length=80),
+                   registers_verified:str=Form(max_length=3)):
+    auth(request,'admin.loyalty.correct')
+    if not schema_ready(store.engine):raise HTTPException(503,'loyalty_schema_not_ready')
+    if registers_verified!='yes':raise HTTPException(400,'register_verification_required')
+    try:
+        Redemptions(store).release_reviewed(settings.loyalty_shop_domain,redemption_id,reference,
+            lambda s,p:authorize(s,request,p))
+    except ValueError:raise HTTPException(409,'reward_review_conflict') from None
+    return RedirectResponse('/loyalty',status_code=303)
+
+
+@router.post('/loyalty/rewards/resolve')
+def resolve_reward(request:Request,redemption_id:int=Form(gt=0),reference:str=Form(max_length=80),
+                   debit_verified:str=Form(max_length=3),evidence_hash:str=Form(min_length=64,max_length=64)):
+    auth(request,'admin.loyalty.correct')
+    if not schema_ready(store.engine):raise HTTPException(503,'loyalty_schema_not_ready')
+    if debit_verified!='yes':raise HTTPException(400,'debit_verification_required')
+    try:
+        Redemptions(store).resolve_reviewed(settings.loyalty_shop_domain,redemption_id,reference,
+            lambda s,p:authorize(s,request,p),expected_hash=evidence_hash)
+    except ValueError:raise HTTPException(409,'reward_review_conflict') from None
+    return RedirectResponse('/loyalty',status_code=303)
+
+
+@router.post('/loyalty/rewards/adjudicate')
+def adjudicate_reward(request:Request,redemption_id:int=Form(gt=0),reference:str=Form(max_length=80),
+                      evidence_hash:str=Form(min_length=64,max_length=64),decision:str=Form(max_length=10),
+                      exception_verified:str=Form(max_length=3)):
+    auth(request,'admin.loyalty.correct')
+    if posting_gates(settings) or not schema_ready(store.engine):raise HTTPException(503,'loyalty_posting_not_ready')
+    if exception_verified!='yes':raise HTTPException(400,'reward_verification_required')
+    try:
+        Redemptions(store,posting_allowed=lambda:not posting_gates(settings),
+            policy_getter=lambda:policy_from_settings(settings)).adjudicate_reviewed(
+                settings.loyalty_shop_domain,redemption_id,evidence_hash,decision,reference,
+                lambda s,p:authorize(s,request,p))
+    except ValueError:raise HTTPException(409,'reward_review_conflict') from None
+    return RedirectResponse('/loyalty',status_code=303)
+
+
+@router.post('/loyalty/rewards/retry')
+def retry_reward(request:Request,redemption_id:int=Form(gt=0),reference:str=Form(max_length=80)):
+    auth(request,'admin.loyalty.reconcile')
+    if not schema_ready(store.engine):raise HTTPException(503,'loyalty_schema_not_ready')
+    try:
+        Redemptions(store).retry_reviewed(settings.loyalty_shop_domain,redemption_id,reference,
+            lambda s,p:authorize(s,request,p))
+    except ValueError:raise HTTPException(409,'reward_review_conflict') from None
+    return RedirectResponse('/loyalty',status_code=303)
 
 
 @router.post('/loyalty/replay')

@@ -16,3 +16,11 @@ target = "pos.customer-details.block.render"
 [[extensions.targeting]]
 module = "./src/HistoryModal.tsx"
 target = "pos.customer-details.action.render"
+
+[[extensions.targeting]]
+module = "./src/CartRewardAction.tsx"
+target = "pos.cart.line-item-details.action.menu-item.render"
+
+[[extensions.targeting]]
+module = "./src/CartRewardModal.tsx"
+target = "pos.cart.line-item-details.action.render"

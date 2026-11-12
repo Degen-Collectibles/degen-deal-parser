@@ -54,4 +54,6 @@ jobs:
         run: DEGEN_EXPECTED_GIT_SHA="$GITHUB_SHA" ./scripts/redeploy-linux.sh
 
       - name: Verify health
-        run: curl -fsS http://127.0.0.1:8000/health >/dev/null
+        run: |
+          set -euo pipefail
+          curl -fsS --max-time 10 http://127.0.0.1:8000/health | python3 scripts/check_deploy_health.py

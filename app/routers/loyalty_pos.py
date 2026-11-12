@@ -136,6 +136,8 @@ def build_router(engine, settings):
             log.warning('loyalty POS read unavailable')
             return error('pos_read_unavailable',503)
         payload['next_cursor'] = access.encode_cursor(next_page) if next_page else None
+        from ..loyalty.reward_policy import redemption_gates
+        payload['rewards_available'] = not bool(redemption_gates(settings, issuing=False))
         payload['posting_paused'] = not (settings.loyalty_processing_enabled and settings.loyalty_posting_enabled)
         return JSONResponse(payload, headers={'Cache-Control':'no-store'})
 

@@ -40,8 +40,6 @@ def ledger_snapshot(engine, shop, customer, *, limit=25, cursor=None):
         rows = connection.execute(statement).mappings().all()
     summary = rows[0]
     balance = str(int(summary['balance']))
-    if balance.startswith('-'):
-        raise SnapshotChanged('ledger_review_required')
     if cursor and (balance != cursor['balance'] or summary['count'] != cursor['count']):
         raise SnapshotChanged('snapshot_changed')
     history = [row for row in rows if row['id'] is not None]
@@ -50,10 +48,10 @@ def ledger_snapshot(engine, shop, customer, *, limit=25, cursor=None):
     as_of = cursor['as_of'] if cursor else datetime.now(timezone.utc).isoformat()
     def stamp(value):
         return value.replace(tzinfo=timezone.utc).isoformat() if value else None
-    labels = {'earned':'Purchase points', 'refund':'Refund adjustment'}
+    labels = {'earned':'Purchase points', 'refund':'Refund adjustment', 'reward_redeemed':'Reward redeemed', 'reward_restored':'Reward points restored'}
     result = dict(customer_id=customer, balance_points=balance, has_history=summary['count'] > 0,
                   as_of=as_of, checked_at=stamp(summary['checked_at']),
-                  needs_review=bool(summary['review'] or summary['account_hold']), updates_pending=bool(summary['pending']),
+                  needs_review=bool(summary['review'] or summary['account_hold'] or int(balance) < 0), updates_pending=bool(summary['pending']),
                   history=[dict(delta_points=str(int(row['delta'])), label=labels.get(row['reason'],'Administrator adjustment'),
                                 created_at=stamp(row['created_at'])) for row in history])
     next_page = dict(customer=customer, upper=cursor['upper'] if cursor else summary['upper'],

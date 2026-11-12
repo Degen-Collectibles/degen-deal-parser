@@ -23,7 +23,7 @@ PATH = '/api/loyalty/pos/customers/101'
 
 
 def configuration(**changes):
-    values = dict(loyalty_shop_domain=SHOP, loyalty_shop_id='gid://shopify/Shop/1',
+    values = dict(shopify_store_domain=SHOP, loyalty_shop_domain=SHOP, loyalty_shop_id='gid://shopify/Shop/1',
                   loyalty_pos_read_enabled=True, loyalty_pos_all_staff_enabled=True,
                   loyalty_pos_client_id=CLIENT, loyalty_pos_client_secret=SECRET,
                   loyalty_pos_session_requests=60, loyalty_pos_total_requests=600)
@@ -195,7 +195,8 @@ def test_schema_not_ready_and_database_failure_are_sanitized(engine):
     empty = create_engine('sqlite:///:memory:')
     assert read(client(empty)).status_code == 503
     c = client(engine)
-    with engine.begin() as conn:conn.execute(text('DROP TABLE loyalty_ledger'))
+    with engine.begin() as conn:
+        conn.execute(text('DROP TABLE loyalty_ledger' + (' CASCADE' if engine.dialect.name=='postgresql' else '')))
     response = read(c)
     assert response.status_code == 503 and 'SQL' not in response.text
 

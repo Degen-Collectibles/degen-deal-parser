@@ -26,6 +26,7 @@ class RetryRequest(BaseModel):
 class HealthOut(BaseModel):
     ok: bool
     db_ok: bool = False
+    loyalty_ready: bool = False
     local_runtime_status: str = "unknown"
     local_runtime_label: str = "Unknown"
     local_runtime_needs_attention: bool = False
