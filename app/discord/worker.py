@@ -1209,6 +1209,21 @@ async def run_periodic_stitch_audit_once() -> dict | None:
     }
 
 
+def stitch_audit_task_enabled(settings_obj=None) -> bool:
+    """Whether the stitch-audit background task should be started at all.
+
+    The loop returns immediately when the audit is switched off, and a
+    supervisor that started it anyway would treat that as a crash and restart
+    it forever.
+    """
+    settings_obj = settings_obj or settings
+    return bool(
+        settings_obj.discord_ingest_enabled
+        and settings_obj.parser_worker_enabled
+        and settings_obj.periodic_stitch_audit_enabled
+    )
+
+
 async def periodic_stitch_audit_loop(stop_event: asyncio.Event) -> None:
     if not settings.periodic_stitch_audit_enabled or not settings.parser_worker_enabled:
         return
