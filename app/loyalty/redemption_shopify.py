@@ -37,6 +37,9 @@ CREATE = '''mutation RewardCodeCreate($input:DiscountCodeBasicInput!) {
   codeDiscountNode { id } userErrors { field code }
  }
 }'''
+USAGE = '''query RewardCodeUsage($code:String!) {
+ codeDiscountNodeByCode(code:$code) { id codeDiscount { ... on DiscountCodeBasic { title status asyncUsageCount } } }
+}'''
 DEACTIVATE = '''mutation RewardCodeDisable($id:ID!) {
  discountCodeDeactivate(id:$id) { codeDiscountNode { id } userErrors { field code } }
 }'''
@@ -202,6 +205,16 @@ class DiscountProvider:
         result=(await self.query(DEACTIVATE,{'id':node['id']}))['discountCodeDeactivate']
         if result.get('userErrors') or (result.get('codeDiscountNode') or {}).get('id')!=node['id']:
             raise RedemptionError('discount_disable_unconfirmed')
+
+    async def confirmed_unused(self,row):
+        """True only when Shopify shows this exact code deactivated with zero uses."""
+        node=(await self.query(USAGE,{'code':row.code}))['codeDiscountNodeByCode']
+        if node is None:
+            # Never created at Shopify, so it cannot have been used.
+            return not row.provider_id
+        discount=node.get('codeDiscount') or {}
+        return (discount.get('title')==f'Degen reward {row.id}' and discount.get('status')=='EXPIRED'
+                and discount.get('asyncUsageCount')==0)
 
     async def order_evidence(self,row):
         # Search is a discovery hint only. Canonical evidence and exact code are checked.

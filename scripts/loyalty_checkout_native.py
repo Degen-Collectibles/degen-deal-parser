@@ -44,6 +44,7 @@ class IntegratedProvider:
         self.provider.issuance_check = getattr(self, 'issuance_check', None)
         return await self.provider.ensure_discount(row)
     async def deactivate(self, row): return await self.provider.deactivate(row)
+    async def confirmed_unused(self, row): return await self.provider.confirmed_unused(row)
 
     async def order_evidence(self, row):
         from app.loyalty.config import policy_from_settings, posting_gates

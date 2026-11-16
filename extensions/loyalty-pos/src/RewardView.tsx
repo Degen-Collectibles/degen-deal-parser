@@ -206,6 +206,23 @@ export function RewardView({api}:{api:ContextApi}) {
     setBusy(true);
     try {
       const row=await request({action:'cancel',redemption_id:reservation.redemption_id});
+      if(current() && row.state==='cancelled') {
+        // The server confirmed the code is dead and unused, so the points are free again.
+        // Take the dead discount off the cart when it is still the one we applied.
+        const cart=api.cart?.current.value;
+        const applied=cart?(cart.cartDiscounts.length?cart.cartDiscounts:(cart.cartDiscount?[cart.cartDiscount]:[])):[];
+        let cleared=!applied.length;
+        if(!cleared && reservation.code && applied.length===1 && applied[0].discountDescription===reservation.code &&
+          typeof api.cart?.removeCartDiscount==='function') {
+          try {await api.cart.removeCartDiscount();cleared=true;} catch {cleared=false;}
+        }
+        if(!current())return;
+        if(reservation.state!=='cancelled')shift(1,-1);
+        setReservation(undefined);requestKey.current=undefined;applicationAttempted.current=false;
+        setMessage(cleared?'Reward cancelled. The points are available again.':
+          'Reward cancelled. The points are available again. Remove the reward discount from the cart before continuing.');
+        return;
+      }
       if(current()) {setReservation(row);setMessage(row.state==='committed' || row.state==='restored'?
         'This reward already belongs to a verified sale. Use the normal POS refund flow.':
         'Cancellation needs review. Check and remove the reward discount from the POS cart before continuing. Reserved points need administrator review before reuse.');}

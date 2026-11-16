@@ -86,3 +86,40 @@ def test_malformed_json_is_a_client_error(store):
     c=client(store)
     response=c.post(PATH,headers={'Authorization':'Bearer '+token(),'Content-Type':'application/json'},content='{')
     assert response.status_code==400 and response.json()['error']=='invalid_request'
+
+
+def test_register_cancel_frees_points_when_provider_confirms_unused(store):
+    add_entry(store.engine,1000)
+    c=client(store);headers={'Authorization':'Bearer '+token()}
+    reserve={'action':'reserve','request_key':'cancel_request_001','variant_ids':['gid://shopify/ProductVariant/11']}
+    row=c.post(PATH,headers=headers,json=reserve).json()
+    # Without positive confirmation the hold stays for review, as before.
+    held=c.post(PATH,headers=headers,json={'action':'cancel','redemption_id':row['redemption_id']})
+    assert held.status_code==200 and held.json()['state']=='review'
+    assert c.get(PATH,headers=headers).json()['reserved_points']==500
+
+def test_register_cancel_with_confirmation_allows_a_new_reward(store):
+    add_entry(store.engine,1000)
+    settings=client.__globals__['configuration'](loyalty_redemption_enabled=True,loyalty_redemption_all_staff_enabled=True,
+        loyalty_redemption_provider_verified=True,
+        loyalty_location_ids='2', loyalty_launch_at='2026-01-01T00:00:00Z',
+        loyalty_processing_enabled=True, loyalty_posting_enabled=True, loyalty_read_access_verified=True,
+        loyalty_budget_cents=0, loyalty_exception_owner='test-owner', loyalty_evidence_retention_days=30,
+        loyalty_ledger_retention_days=30, loyalty_backup_retention_days=30)
+    class Provider:
+        async def eligibility(self, ids):return {'requested':ids,'eligible':ids}
+        async def ensure_discount(self,row):return 'gid://shopify/DiscountCodeNode/'+str(row.id)
+        async def order_evidence(self,row):return None
+        async def deactivate(self,row):pass
+        async def confirmed_unused(self,row):return True
+    app=FastAPI();app.include_router(build_router(store.engine,settings,lambda _:Provider()))
+    c=TestClient(app);headers={'Authorization':'Bearer '+token()}
+    reserve={'action':'reserve','request_key':'cancel_request_001','variant_ids':['gid://shopify/ProductVariant/11']}
+    row=c.post(PATH,headers=headers,json=reserve).json()
+    done=c.post(PATH,headers=headers,json={'action':'cancel','redemption_id':row['redemption_id']})
+    assert done.status_code==200,done.text
+    assert done.json()['state']=='cancelled' and done.json()['can_cancel'] is False and done.json()['code'] is None
+    state=c.get(PATH,headers=headers).json()
+    assert state['reserved_points']==0 and state['available_points']==1000 and state['pending'] is None
+    again=c.post(PATH,headers=headers,json=dict(reserve,request_key='cancel_request_002'))
+    assert again.status_code==200 and again.json()['redemption_id']!=row['redemption_id']

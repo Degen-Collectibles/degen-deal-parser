@@ -112,7 +112,8 @@ def build_router(engine, settings, provider_factory=None):
                     row=await asyncio.to_thread(redemptions.reserve,access.shop,customer_id,session,
                         data['request_key'],Reward.from_settings(settings),eligibility=eligibility)
                 row=await asyncio.wait_for(prepare(redemptions,provider,row) if kind=='reserve'
-                                           else reconcile(redemptions,provider,row, allow_prepare=not bool(redemption_gates(settings))),timeout=45)
+                                           else reconcile(redemptions,provider,row, allow_prepare=not bool(redemption_gates(settings)),
+                                                          cashier_cancel=kind=='cancel'),timeout=45)
             return response(dict(redemption_id=row.id,state=row.state,points=row.points,
                 can_cancel=row.debit_ledger_id is None and row.state in ('reserved','ready','review','cancelling'),
                 discount_cents=row.discount_cents,minimum_cents=row.minimum_cents,

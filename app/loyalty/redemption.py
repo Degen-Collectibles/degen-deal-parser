@@ -428,6 +428,27 @@ class Redemptions:
             s.add(row)
         self.store.transaction(operation)
 
+    def release_cancelled(self, shop, id):
+        """Cashier cancelled at the register before any sale.
+
+        Only called after the provider confirmed the code is deactivated, has
+        never been used, and no order carries it. A sale that still surfaces
+        later is debited by settle() and sent to review, so the worst case is
+        one reward's value pending review, never a silent loss.
+        """
+        def operation(s):
+            row0 = s.exec(select(Redemption).where(Redemption.shop == shop, Redemption.id == id)).first()
+            if row0 is None: raise RedemptionError('redemption_not_found')
+            s.exec(select(Account).where(Account.id == row0.account_id).with_for_update()).one()
+            row = s.exec(select(Redemption).where(Redemption.shop == shop, Redemption.id == id).with_for_update()).one()
+            if row.state == 'cancelled': return row
+            if row.state != 'cancelling' or row.debit_ledger_id or row.order_id:
+                raise RedemptionError('reservation_not_releasable')
+            row.state = 'cancelled'; row.reason = 'cashier_cancelled_unused'; row.checked_at = naive()
+            s.add(row)
+            return row
+        return self.store.transaction(operation)
+
     def release_reviewed(self, shop, id, reference, authorize):
         """Explicit administrator attestation; never called by POS or a timer."""
         from .ops import key
@@ -600,9 +621,9 @@ async def prepare(redemptions, provider, row):
     return await asyncio.to_thread(redemptions.transition, row.shop, row.id, 'ready', provider_id=provider_id)
 
 
-async def reconcile(redemptions, provider, row, *, allow_prepare=True):
+async def reconcile(redemptions, provider, row, *, allow_prepare=True, cashier_cancel=False):
     try:
-        result = await _reconcile(redemptions, provider, row, allow_prepare=allow_prepare)
+        result = await _reconcile(redemptions, provider, row, allow_prepare=allow_prepare, cashier_cancel=cashier_cancel)
         proof = json.loads(result.observed_order_json if result.manual_decision_hash else result.evidence_json) if result and result.evidence_json != '{}' else None
         if proof is not None and result.order_updated_at:
             proof['updated_at'] = result.order_updated_at.isoformat()+'Z'
@@ -613,7 +634,7 @@ async def reconcile(redemptions, provider, row, *, allow_prepare=True):
         raise
 
 
-async def _reconcile(redemptions, provider, row, *, allow_prepare=True):
+async def _reconcile(redemptions, provider, row, *, allow_prepare=True, cashier_cancel=False):
     async def observe(evidence):
         return await asyncio.to_thread(redemptions.observe, row.shop, row.id, evidence)
     provider.observation = observe
@@ -627,6 +648,16 @@ async def _reconcile(redemptions, provider, row, *, allow_prepare=True):
     if row.state == 'cancelling' or naive() >= row.expires_at or (not allow_prepare and row.state in ('reserved','ready')):
         # Never release based on usageCount/search absence: Shopify is asynchronous.
         await provider.deactivate(row)
+        # A cashier's own cancel may release the hold, but only on positive
+        # confirmation: the code is deactivated with zero uses, and a second
+        # order search after deactivation still finds nothing. Expiry, admin
+        # retries and the background worker never take this path.
+        confirm = getattr(provider, 'confirmed_unused', None)
+        if cashier_cancel and row.state == 'cancelling' and confirm is not None and await confirm(row):
+            evidence = await provider.order_evidence(row)
+            if evidence is not None:
+                return await asyncio.to_thread(redemptions.settle, row.shop, row.id, evidence)
+            return await asyncio.to_thread(redemptions.release_cancelled, row.shop, row.id)
         return await asyncio.to_thread(redemptions.transition, row.shop, row.id, 'review', reason='unused_code_requires_review')
     if row.state == 'reserved': return await prepare(redemptions, provider, row)
     return row

@@ -69,6 +69,36 @@ test('reserves before applying single-use code and never sends price or points',
   expect(await screen.findByText(/Reward applied/)).toBeTruthy();
   expect(screen.getByText('0 available · 500 reserved')).toBeTruthy();
 });
+test('a confirmed cancel frees the points, clears the cart discount and allows a new redeem',async()=>{
+  const api=fixture();
+  const remove=vi.fn(async()=>{api.cart!.current.value.cartDiscounts=[];});
+  (api.cart as unknown as {removeCartDiscount:typeof remove}).removeCartDiscount=remove;
+  const code='DEGEN-'+'A'.repeat(32);
+  stubFetch(vi.fn().mockResolvedValueOnce(reply(status))
+    .mockResolvedValueOnce(reply({redemption_id:1,state:'ready',code}))
+    .mockResolvedValueOnce(reply({redemption_id:1,state:'cancelled',code:null})));
+  render(<RewardView api={api}/>);
+  fireEvent.click(await screen.findByText('Use 500 points for $10.00 off'));
+  expect(await screen.findByText(/Reward applied/)).toBeTruthy();
+  fireEvent.click(screen.getByText('Cancel this reward'));
+  expect(await screen.findByText('Reward cancelled. The points are available again.')).toBeTruthy();
+  expect(remove).toHaveBeenCalledOnce();
+  expect(screen.getByText('500 available · 0 reserved')).toBeTruthy();
+  expect(screen.queryByText('Cancel this reward')).toBeNull();
+  expect(screen.getByText('Use 500 points for $10.00 off').hasAttribute('disabled')).toBe(false);
+});
+test('an unconfirmed cancel keeps the hold and asks for review',async()=>{
+  const api=fixture();
+  stubFetch(vi.fn().mockResolvedValueOnce(reply(status))
+    .mockResolvedValueOnce(reply({redemption_id:1,state:'ready',code:'DEGEN-'+'A'.repeat(32)}))
+    .mockResolvedValueOnce(reply({redemption_id:1,state:'review',code:null,can_cancel:true})));
+  render(<RewardView api={api}/>);
+  fireEvent.click(await screen.findByText('Use 500 points for $10.00 off'));
+  expect(await screen.findByText(/Reward applied/)).toBeTruthy();
+  fireEvent.click(screen.getByText('Cancel this reward'));
+  expect(await screen.findByText(/Cancellation needs review/)).toBeTruthy();
+  expect(screen.getByText('0 available · 500 reserved')).toBeTruthy();
+});
 test('redeem works when the runtime has no crypto.randomUUID',async()=>{
   const {newRequestKey}=await import('../src/RewardView');
   vi.stubGlobal('crypto',{getRandomValues:(bytes:Uint8Array)=>bytes.fill(171)});

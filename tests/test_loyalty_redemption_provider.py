@@ -119,3 +119,22 @@ def test_concurrent_creation_recovers_only_verified_same_code(conflicting):
     else:
         assert asyncio.run(provider.ensure_discount(row))==node['id']
     assert calls==[LOOKUP,CREATE,LOOKUP]
+
+
+@pytest.mark.parametrize('node,provider_id,expected',[
+    ({'codeDiscount':{'title':'Degen reward 1','status':'EXPIRED','asyncUsageCount':0}},'gid://shopify/DiscountCodeNode/1',True),
+    ({'codeDiscount':{'title':'Degen reward 1','status':'ACTIVE','asyncUsageCount':0}},'gid://shopify/DiscountCodeNode/1',False),
+    ({'codeDiscount':{'title':'Degen reward 1','status':'EXPIRED','asyncUsageCount':1}},'gid://shopify/DiscountCodeNode/1',False),
+    ({'codeDiscount':{'title':'Someone else','status':'EXPIRED','asyncUsageCount':0}},'gid://shopify/DiscountCodeNode/1',False),
+    ({'codeDiscount':{'title':'Degen reward 1','status':'EXPIRED'}},'gid://shopify/DiscountCodeNode/1',False),
+    (None,None,True),   # never created at Shopify
+    (None,'gid://shopify/DiscountCodeNode/1',False),   # created, but no longer readable
+])
+def test_unused_confirmation_requires_deactivated_code_with_zero_uses(node,provider_id,expected):
+    row,_=fixture();row.provider_id=provider_id
+    provider=DiscountProvider(None,'test.myshopify.com','synthetic','1','2')
+    async def query(q,variables):
+        assert variables=={'code':row.code}
+        return {'codeDiscountNodeByCode':node}
+    provider.query=query
+    assert asyncio.run(provider.confirmed_unused(row)) is expected
