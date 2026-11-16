@@ -7,6 +7,15 @@ type Reservation = {redemption_id:number;state:string;code:string|null;can_cance
 // Survives modal remounts while a native mutation is still unresolved.
 const pendingApplications=new Set<string>();
 const dollars=(cents:number)=>`$${(cents/100).toFixed(2)}`;
+// Some register runtimes (Android) do not provide crypto.randomUUID.
+export function newRequestKey() {
+  const c=(globalThis as {crypto?:Crypto}).crypto;
+  if(typeof c?.randomUUID==='function')return c.randomUUID();
+  const bytes=new Uint8Array(16);
+  if(typeof c?.getRandomValues==='function')c.getRandomValues(bytes);
+  else for(let i=0;i<16;i++)bytes[i]=Math.floor(Math.random()*256);
+  return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+}
 export function cartVariantIds(api:ContextApi) {
   const lines=api.cart?.current.value.lineItems??[];
   return [...new Set(lines.filter(l=>Number.isSafeInteger(l.variantId) && l.variantId!>0)
@@ -121,10 +130,11 @@ export function RewardView({api}:{api:ContextApi}) {
   async function redeem() {
     if(busy || applicationAttempted.current || !status || status.issuance_enabled===false || !current() || !canRedeem(api,status.reward.minimum_cents))return;
     setBusy(true);
-    const cartBefore=JSON.stringify(api.cart!.current.value);
-    const basis=cartBasis(api.cart!.current.value);
-    requestKey.current??=crypto.randomUUID();
     try {
+      // Everything that can throw stays inside try so the button never sticks disabled.
+      const cartBefore=JSON.stringify(api.cart!.current.value);
+      const basis=cartBasis(api.cart!.current.value);
+      requestKey.current??=newRequestKey();
       const variantIds=cartVariantIds(api);
       const custom=hasCustomSales(api);
       const scope={variant_ids:variantIds,...(custom?{custom_sales:true}:{})};
