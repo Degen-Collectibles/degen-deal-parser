@@ -37,7 +37,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest
+          # beautifulsoup4 is imported by tests/test_sms_consent.py; it used to arrive
+          # transitively through browser-use and no longer does.
+          pip install pytest beautifulsoup4
 
       - name: Install Playwright browsers
         run: python -m playwright install --with-deps chromium webkit
