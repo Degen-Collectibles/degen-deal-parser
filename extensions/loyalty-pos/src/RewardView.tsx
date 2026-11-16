@@ -127,9 +127,14 @@ export function RewardView({api}:{api:ContextApi}) {
     }).catch(error=>{if(current())setMessage(error.message);});
     return ()=>{mounted.current=false;unsubscribe?.();clearInterval(timer);};
   },[api,reload]);
+  // Move whole rewards between the displayed "available" and "reserved" counts.
+  const shift=(available:number,reserved:number)=>setStatus(s=>s && {...s,
+    available_points:Math.max(0,s.available_points+available*s.reward.points),
+    reserved_points:Math.max(0,s.reserved_points+reserved*s.reward.points)});
   async function redeem() {
     if(busy || applicationAttempted.current || !status || status.issuance_enabled===false || !current() || !canRedeem(api,status.reward.minimum_cents))return;
     setBusy(true);
+    const fresh=!reservation;
     try {
       // Everything that can throw stays inside try so the button never sticks disabled.
       const cartBefore=JSON.stringify(api.cart!.current.value);
@@ -148,6 +153,8 @@ export function RewardView({api}:{api:ContextApi}) {
       const row:Reservation=await request({action:'reserve',request_key:requestKey.current,...scope});
       if(!Number.isSafeInteger(row.redemption_id))throw Error('Reward response is unavailable. Retry here.');
       if(current())setReservation(row);
+      // Keep the displayed counts in step with a newly created hold.
+      if(current() && fresh && ['ready','reserved'].includes(row.state))shift(-1,1);
       if(!current() || JSON.stringify(api.cart!.current.value)!==cartBefore)
         throw Error('Cart changed. Reward remains reserved; ask an administrator to review it.');
       if(row.state!=='ready' || !row.code || !/^DEGEN-[A-F0-9]{32}$/.test(row.code))
@@ -185,6 +192,10 @@ export function RewardView({api}:{api:ContextApi}) {
     setBusy(true);
     try {
       const row=await request({action:'refresh',redemption_id:reservation.redemption_id});
+      if(current() && row.state!==reservation.state) {
+        if(row.state==='committed')shift(0,-1);
+        if(row.state==='restored')shift(1,-1);
+      }
       if(current()) {setReservation(row);setMessage(row.state==='committed'?'Sale verified. Points redeemed.':
         row.state==='restored'?'Full refund verified. Reward points restored.':'Reward is still pending. Do not redeem again for this sale.');}
     } catch(error) {if(current())setMessage(error instanceof Error?error.message:'Unable to check reward.');}

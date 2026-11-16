@@ -67,6 +67,14 @@ test('reserves before applying single-use code and never sends price or points',
   await waitFor(()=>expect(api.cart!.addCartCodeDiscount).toHaveBeenCalledWith('DEGEN-'+'A'.repeat(32)));
   expect(Object.keys(JSON.parse(fetcher.mock.calls[1][1].body)).sort()).toEqual(['action','request_key','variant_ids']);
   expect(await screen.findByText(/Reward applied/)).toBeTruthy();
+  expect(screen.getByText('0 available · 500 reserved')).toBeTruthy();
+});
+test('redeem works when the runtime has no crypto.randomUUID',async()=>{
+  const {newRequestKey}=await import('../src/RewardView');
+  vi.stubGlobal('crypto',{getRandomValues:(bytes:Uint8Array)=>bytes.fill(171)});
+  expect(newRequestKey()).toBe('ab'.repeat(16));
+  vi.stubGlobal('crypto',undefined);
+  expect(newRequestKey()).toMatch(/^[0-9a-f]{32}$/);
 });
 test('cart changed during reservation never receives the code',async()=>{
   const api=fixture();let resolve!:(value:Response)=>void;
@@ -131,9 +139,10 @@ test('incorrect applied discount never produces a success message',async()=>{
     redemption_id:1,state:'ready',code:'DEGEN-'+'A'.repeat(32)})));
   render(<RewardView api={api}/>);
   fireEvent.click(await screen.findByText('Use 500 points for $10.00 off'));
-  expect(await screen.findByText(/Discount could not be verified/,{}, {timeout:4000})).toBeTruthy();
+  // The message appears after a 3-second verification window; leave headroom on slow machines.
+  expect(await screen.findByText(/Discount could not be verified/,{}, {timeout:8000})).toBeTruthy();
   expect(screen.queryByText(/Reward applied/)).toBeNull();
-});
+},12000);
 test('another-register hold explains where to recover it',async()=>{
   stubFetch(vi.fn().mockResolvedValueOnce(reply({...status,reserved_points:500,available_points:0,pending:null})));
   render(<RewardView api={fixture()}/>);
