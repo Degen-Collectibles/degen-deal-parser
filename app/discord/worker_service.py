@@ -23,6 +23,7 @@ from ..tiktok.tiktok_auth_refresh import refresh_tiktok_auth_if_needed
 from .worker import (
     parser_loop,
     periodic_stitch_audit_loop,
+    stitch_audit_task_enabled,
 )
 
 settings = get_settings()
@@ -204,7 +205,7 @@ async def run_worker_service() -> None:
                     name="recent-message-audit",
                 )
             )
-    if settings.discord_ingest_enabled and settings.parser_worker_enabled:
+    if stitch_audit_task_enabled(settings):
         background_tasks.append(
             asyncio.create_task(
                 periodic_stitch_audit_loop(stop_event),

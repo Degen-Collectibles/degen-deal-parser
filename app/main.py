@@ -195,6 +195,7 @@ from .discord.worker import (
     parser_loop,
     periodic_inventory_price_loop,
     periodic_stitch_audit_loop,
+    stitch_audit_task_enabled,
     queue_auto_reprocess_candidates,
     queue_reparse_range,
 )
@@ -409,7 +410,7 @@ async def lifespan(app: FastAPI):
         app.state.recent_audit_task = None
         app.state.attachment_repair_task = None
 
-    if settings.discord_ingest_enabled and settings.parser_worker_enabled:
+    if stitch_audit_task_enabled(settings):
         stitch_audit_task = track_background_task(
             asyncio.create_task(
                 periodic_stitch_audit_loop(stop_event),
