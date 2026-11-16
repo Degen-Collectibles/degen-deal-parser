@@ -182,6 +182,8 @@ async def process_pending_shopify_sync_jobs_once(
                 job.last_error = "Inventory item is missing or archived."
                 job.processed_at = utcnow()
                 session.add(job)
+                # Save before moving on; otherwise the job stays pending and is retried forever.
+                session.commit()
                 failed += 1
                 continue
             ok, error = await sync_inventory_item_to_shopify(
