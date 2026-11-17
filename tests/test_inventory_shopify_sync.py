@@ -645,6 +645,57 @@ class ShopifySyncWorkerTests(unittest.IsolatedAsyncioTestCase):
             engine.dispose()
 
 
+class ShopifySyncJobQueueTests(unittest.IsolatedAsyncioTestCase):
+    async def test_job_for_archived_item_is_saved_as_error_and_not_retried(self):
+        from contextlib import contextmanager
+
+        from app.models import ShopifySyncJob, utcnow
+        from app.shopify_sync import SHOPIFY_SYNC_JOB_ERROR
+        from app.shopify_sync_worker import process_pending_shopify_sync_jobs_once
+
+        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        SQLModel.metadata.create_all(engine)
+
+        @contextmanager
+        def session_without_implicit_commit():
+            with Session(engine) as session:
+                yield session
+
+        try:
+            with Session(engine) as session:
+                item = InventoryItem(
+                    barcode="DGN-ARCHIVED1",
+                    item_type=ITEM_TYPE_SINGLE,
+                    game="Pokemon",
+                    card_name="Pikachu",
+                    quantity=1,
+                    archived_at=utcnow(),
+                )
+                session.add(item)
+                session.commit()
+                session.refresh(item)
+                session.add(ShopifySyncJob(item_id=item.id, action="archive", source="Inventory Bulk Action"))
+                session.commit()
+
+            with patch("app.shopify_sync_worker.managed_session", session_without_implicit_commit), patch(
+                "app.shopify_sync_worker.sync_inventory_item_to_shopify", new=AsyncMock()
+            ) as mocked_sync:
+                first = await process_pending_shopify_sync_jobs_once()
+                second = await process_pending_shopify_sync_jobs_once()
+
+            self.assertEqual(first, (0, 1))
+            self.assertEqual(second, (0, 0))
+            mocked_sync.assert_not_awaited()
+            with Session(engine) as session:
+                job = session.exec(select(ShopifySyncJob)).one()
+                self.assertEqual(job.status, SHOPIFY_SYNC_JOB_ERROR)
+                self.assertEqual(job.attempts, 1)
+                self.assertEqual(job.last_error, "Inventory item is missing or archived.")
+                self.assertIsNotNone(job.processed_at)
+        finally:
+            engine.dispose()
+
+
 class _FakeResponse:
     def __init__(self, payload, status_code=200):
         self._payload = payload
