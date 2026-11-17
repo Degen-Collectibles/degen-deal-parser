@@ -1,0 +1,4 @@
+roles = ["frontend", "backend"]
+port = 8769
+[commands]
+dev = "/tmp/degen-loyalty-test-venv/bin/python ../../../scripts/loyalty_checkout_native.py"

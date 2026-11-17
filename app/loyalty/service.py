@@ -14,7 +14,7 @@ from sqlalchemy import func, or_, text, update
 from sqlalchemy.exc import OperationalError, DBAPIError
 from sqlmodel import Session, select
 from .domain import Review, RULE_VERSION, calculate, fingerprint, gid, timestamp, whole
-from .models import LoyaltyAccount, LoyaltyEntitlement, LoyaltyInbox, LoyaltyLedger, LoyaltyReconciliation
+from .models import LoyaltyAccount, LoyaltyEntitlement, LoyaltyInbox, LoyaltyLedger, LoyaltyReconciliation, LoyaltyRedemption
 from .schema import schema_ready
 
 log = logging.getLogger(__name__)
@@ -126,6 +126,9 @@ class Store:
                 raise ValueError('delivery_conflict')
             if row.order_id:
                 insert_missing(s,LoyaltyEntitlement,dict(shop=shop,order_id=row.order_id,created_at=received,next_check_at=received),['shop','order_id'])
+                s.execute(update(LoyaltyRedemption).where(LoyaltyRedemption.shop==shop,
+                    LoyaltyRedemption.order_id==row.order_id,LoyaltyRedemption.state!='restored')
+                    .values(checked_at=None, work_generation=LoyaltyRedemption.work_generation+1))
             for customer in (clean.get('merge_ids',[]) if clean.get('merge_status') in ('completed','succeeded') else []):
                 customer = gid('Customer',customer)
                 insert_missing(s,LoyaltyAccount,dict(shop=shop,customer_id=customer),['shop','customer_id'])
@@ -255,7 +258,7 @@ class Store:
         return delta
 
     @staticmethod
-    def post(s,row,target,reason,current,*,business_key=None,actor=None):
+    def post(s,row,target,reason,current,*,business_key=None,actor=None,proof=None):
         delta=target-row.posted_points
         if not delta:
             return
@@ -263,7 +266,8 @@ class Store:
         s.add(LoyaltyLedger(shop=row.shop,account_id=row.account_id,entitlement_id=row.id,
             revision=row.revision,business_key=business_key or f'order:{row.order_id}:revision:{row.revision}',
             delta=delta,resulting_points=target,reason=reason,rule_version=RULE_VERSION,
-            evidence_hash=row.evidence_hash,evidence_json=row.evidence_json,actor_user_id=actor,created_at=current))
+            evidence_hash=fingerprint(proof) if proof is not None else row.evidence_hash,
+            evidence_json=dump(proof) if proof is not None else row.evidence_json,actor_user_id=actor,created_at=current))
         row.posted_points=target
 
     def fail(self, lease, reason='canonical_fetch_failed', *, now=None):
@@ -285,7 +289,10 @@ class Store:
         cutoff=naive(now)-timedelta(days=days)
         def operation(s):
             rows=s.exec(select(LoyaltyInbox).where(LoyaltyInbox.shop==shop,LoyaltyInbox.status=='done',~LoyaltyInbox.topic.startswith('admin/'),
-                LoyaltyInbox.completed_at<cutoff,LoyaltyInbox.evidence_json!='{}')
+                LoyaltyInbox.completed_at<cutoff,LoyaltyInbox.evidence_json!='{}',
+                ~select(LoyaltyRedemption.id).where(LoyaltyRedemption.shop==shop,
+                    LoyaltyRedemption.order_id==LoyaltyInbox.order_id, LoyaltyRedemption.state!='restored',
+                    LoyaltyRedemption.work_generation>LoyaltyRedemption.acknowledged_generation).exists())
                 .order_by(LoyaltyInbox.id).limit(limit).with_for_update()).all()
             for row in rows:
                 # Ledger and order evidence retain accounting reproducibility.
@@ -303,6 +310,6 @@ class Store:
         """No cached account balance exists. Compare per-order state to ledger sums."""
         with Session(self.engine) as s:
             rows=s.exec(select(LoyaltyEntitlement.id,LoyaltyEntitlement.posted_points,
-                func.coalesce(func.sum(LoyaltyLedger.delta),0)).outerjoin(LoyaltyLedger,LoyaltyLedger.entitlement_id==LoyaltyEntitlement.id)
+                func.coalesce(func.sum(LoyaltyLedger.delta),0)).outerjoin(LoyaltyLedger,(LoyaltyLedger.entitlement_id==LoyaltyEntitlement.id) & ~LoyaltyLedger.reason.in_(('reward_redeemed','reward_restored')))
                 .where(LoyaltyEntitlement.shop==shop).group_by(LoyaltyEntitlement.id,LoyaltyEntitlement.posted_points)).all()
             return [dict(entitlement_id=id,stored=stored,ledger=int(total)) for id,stored,total in rows if stored!=total]

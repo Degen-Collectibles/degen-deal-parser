@@ -1,10 +1,11 @@
 import {useEffect, useRef, useState} from 'preact/hooks';
+import {RewardView} from './RewardView';
 import type {Api as BlockApi} from '@shopify/ui-extensions/pos.customer-details.block.render';
 import type {} from '@shopify/ui-extensions/pos.customer-details.action.render';
 
-export type ContextApi = Pick<BlockApi, 'customer' | 'session' | 'connectivity'> & {action?: Pick<BlockApi['action'], 'presentModal'>};
+export type ContextApi = Pick<BlockApi, 'customer' | 'session' | 'connectivity'> & {cart?: BlockApi['cart'];action?: Pick<BlockApi['action'], 'presentModal'>};
 type Entry = {delta_points:string;label:string;created_at:string};
-type Snapshot = {customer_id:string;balance_points:string;has_history:boolean;as_of:string;checked_at:string|null;needs_review:boolean;updates_pending:boolean;posting_paused:boolean;next_cursor:string|null;history:Entry[]};
+type Snapshot = {customer_id:string;balance_points:string;has_history:boolean;as_of:string;checked_at:string|null;needs_review:boolean;updates_pending:boolean;posting_paused:boolean;rewards_available?:boolean;next_cursor:string|null;history:Entry[]};
 const unavailable = 'Loyalty is unavailable. Try again when connected.';
 const integer = /^-?(0|[1-9][0-9]{0,29})$/;
 function unit(value:string) {return value==='1'||value==='-1'?'point':'points';}
@@ -15,14 +16,14 @@ function context(api:ContextApi) {
 }
 function validate(value:unknown, customer:string):Snapshot {
   const s=value as Snapshot;
-  if (!s || s.customer_id!==customer || typeof s.balance_points!=='string' || !integer.test(s.balance_points) || s.balance_points.startsWith('-') ||
+  if (!s || s.customer_id!==customer || typeof s.balance_points!=='string' || !integer.test(s.balance_points) ||
       !['has_history','needs_review','updates_pending','posting_paused'].every(k=>typeof s[k as keyof Snapshot]==='boolean') ||
       typeof s.as_of!=='string' || !Number.isFinite(Date.parse(s.as_of)) ||
       !(s.checked_at===null || (typeof s.checked_at==='string' && Number.isFinite(Date.parse(s.checked_at)))) ||
       !(s.next_cursor===null || (typeof s.next_cursor==='string' && s.next_cursor.length<=1800)) ||
       !Array.isArray(s.history) || s.history.length>25 || !s.history.every(e=>
         typeof e.delta_points==='string' && integer.test(e.delta_points) &&
-        ['Purchase points','Refund adjustment','Administrator adjustment'].includes(e.label) &&
+        ['Purchase points','Refund adjustment','Administrator adjustment','Reward redeemed','Reward points restored'].includes(e.label) &&
         typeof e.created_at==='string' && Number.isFinite(Date.parse(e.created_at)))) throw Error(unavailable);
   return s;
 }
@@ -124,6 +125,6 @@ export function LoyaltyView({api,mode}:{api:ContextApi;mode:'block'|'history'}) 
       visible.error && <s-button slot="secondary-actions" variant="secondary" onClick={retry}>Refresh</s-button>}
   </s-pos-block>:<s-page heading="Loyalty activity">
     {(data || visible.error) && <s-button slot="secondary-actions" variant="secondary" onClick={retry}>Refresh</s-button>}
-    <s-scroll-box><s-box padding="base">{content}</s-box></s-scroll-box>
+    <s-scroll-box><s-box padding="base">{api.cart && state.data?.rewards_available === true && <RewardView key={key} api={api}/>} {content}</s-box></s-scroll-box>
   </s-page>;
 }

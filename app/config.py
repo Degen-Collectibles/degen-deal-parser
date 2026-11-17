@@ -274,6 +274,12 @@ class Settings(BaseSettings):
     username_scraper_timeout_seconds: float = Field(default=8.0, alias="USERNAME_SCRAPER_TIMEOUT_SECONDS")
 
     # POS balance reads: local implementation does not enable the all-staff policy.
+    loyalty_redemption_enabled: bool = Field(default=False, alias="LOYALTY_REDEMPTION_ENABLED")
+    loyalty_redemption_all_staff_enabled: bool = Field(default=False, alias="LOYALTY_REDEMPTION_ALL_STAFF_ENABLED")
+    loyalty_redemption_provider_verified: bool = Field(default=False, alias="LOYALTY_REDEMPTION_PROVIDER_VERIFIED")
+    loyalty_reward_points: int = Field(default=500, ge=1, le=1000000, alias="LOYALTY_REWARD_POINTS")
+    loyalty_reward_discount_cents: int = Field(default=1000, ge=1, le=100000, alias="LOYALTY_REWARD_DISCOUNT_CENTS")
+    loyalty_reward_minimum_cents: int = Field(default=10000, ge=1, le=100000000, alias="LOYALTY_REWARD_MINIMUM_CENTS")
     loyalty_pos_read_enabled: bool = Field(default=False, alias="LOYALTY_POS_READ_ENABLED")
     loyalty_pos_all_staff_enabled: bool = Field(default=False, alias="LOYALTY_POS_ALL_STAFF_ENABLED")
     loyalty_pos_client_id: str = Field(default="", alias="LOYALTY_POS_CLIENT_ID")

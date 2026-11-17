@@ -124,4 +124,48 @@ class LoyaltyReconciliation(SQLModel, table=True):
     checked_at: Optional[datetime] = None
 
 
-TABLES = [m.__table__ for m in (LoyaltyAccount,LoyaltyEntitlement,LoyaltyLedger,LoyaltyInbox,LoyaltyReconciliation)]
+class LoyaltyRedemption(SQLModel, table=True):
+    """Durable reservations; terms are snapshotted before any provider call."""
+    __tablename__ = 'loyalty_redemption'
+    __table_args__ = (
+        UniqueConstraint('shop', 'request_key', name='uq_loyalty_redemption_request'),
+        UniqueConstraint('shop', 'code', name='uq_loyalty_redemption_code'),
+        UniqueConstraint('shop', 'order_id', name='uq_loyalty_redemption_order'),
+        CheckConstraint("state IN ('reserved','ready','cancelling','cancelled','committed','restored','review')", name='ck_loyalty_redemption_state'),
+        CheckConstraint('points > 0 AND points = CAST(points AS BIGINT)', name='ck_loyalty_redemption_points'),
+        CheckConstraint('discount_cents > 0 AND minimum_cents >= discount_cents * 10', name='ck_loyalty_redemption_money'),
+    )
+    id: Optional[int] = Field(default=None, primary_key=True)
+    shop: str = Field(max_length=255, index=True)
+    account_id: int = Field(foreign_key='loyalty_account.id', index=True)
+    customer_id: str = Field(max_length=100)
+    request_key: str = Field(max_length=80)
+    session_hash: str = Field(max_length=64)
+    code: str = Field(max_length=80)
+    state: str = Field(default='reserved', max_length=20, index=True)
+    points: int = Field(sa_column=Column(BigInteger, nullable=False))
+    discount_cents: int = Field(sa_column=Column(BigInteger, nullable=False))
+    minimum_cents: int = Field(sa_column=Column(BigInteger, nullable=False))
+    rule_version: str = Field(max_length=80)
+    eligibility_json: str = Field(default='{}', sa_column=Column(Text, nullable=False))
+    provider_id: Optional[str] = Field(default=None, max_length=100)
+    order_id: Optional[str] = Field(default=None, max_length=100)
+    debit_ledger_id: Optional[int] = Field(default=None, foreign_key='loyalty_ledger.id')
+    restore_ledger_id: Optional[int] = Field(default=None, foreign_key='loyalty_ledger.id')
+    first_observed_at: Optional[datetime] = None
+    order_updated_at: Optional[datetime] = None
+    evidence_json: str = Field(default='{}', sa_column=Column(Text, nullable=False))
+    observed_order_json: str = Field(default='{}', sa_column=Column(Text, nullable=False))
+    manual_decision_hash: str = Field(default='', max_length=64)
+    work_generation: int = Field(default=0)
+    acknowledged_generation: int = Field(default=0)
+    review_cause: str = Field(default='', max_length=100)
+    resolved_evidence_hash: str = Field(default='', max_length=64)
+    failure_count: int = Field(default=0)
+    reason: str = Field(default='', max_length=100)
+    created_at: datetime = Field(default_factory=now_utc)
+    expires_at: datetime
+    checked_at: Optional[datetime] = Field(default=None, index=True)
+
+
+TABLES = [m.__table__ for m in (LoyaltyAccount,LoyaltyEntitlement,LoyaltyLedger,LoyaltyInbox,LoyaltyReconciliation,LoyaltyRedemption)]

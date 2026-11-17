@@ -319,12 +319,11 @@ elapsed=0
 sleep 10
 elapsed=10
 while (( elapsed <= MAX_WAIT_SECONDS )); do
-  status="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 10 "$HEALTH_URL" || true)"
-  if [[ "$status" =~ ^[234][0-9][0-9]$ ]]; then
-    log "Health check passed after ${elapsed}s (status $status)"
+  if curl -fsS --max-time 10 "$HEALTH_URL" | python3 scripts/check_deploy_health.py; then
+    log "Health check passed after ${elapsed}s"
     exit 0
   fi
-  log "Health check attempt at ${elapsed}s returned '${status:-no-response}'"
+  log "Health check attempt at ${elapsed}s did not confirm database and loyalty readiness"
   sleep "$INTERVAL_SECONDS"
   elapsed=$((elapsed + INTERVAL_SECONDS))
 done

@@ -10,7 +10,7 @@ import hashlib
 import json
 import re
 
-RULE_VERSION = 'pos-usd-whole-v1'
+RULE_VERSION = 'pos-usd-physical-v2'
 MAX_CENTS = 1_000_000_000_000
 
 
@@ -112,7 +112,7 @@ def _calculate(o, policy, attachment):
         return Entitlement('excluded', 'prelaunch')
     if updated < created:
         raise Review('timestamp_conflict')
-    if o['edited'] or o['exchanges']:
+    if o['exchanges'] or (o['edited'] and not full_refund(o)):
         raise Review('edit_or_exchange_review')
     if o['currency'] != 'USD':
         raise Review('unsupported_currency')
@@ -177,10 +177,8 @@ def _calculate(o, policy, attachment):
         all_line_gross += net + tax
         if type(line['gift_card']) is not bool or type(line['merchandise']) is not bool:
             raise Review('line_classification_unverified')
-        if not line['gift_card'] and not line['merchandise']:
-            # No catalog-name guessing for custom services, tips or fees.
-            raise Review('line_classification_unverified')
-        qualifying = not line['gift_card']
+        # Known services remain in payment/refund proof, but never earn points.
+        qualifying = line['merchandise'] and not line['gift_card']
         if qualifying:
             eligible += net
         lines[lid] = {'net':net, 'refunded':0, 'quantity':line['quantity'], 'refunded_quantity':0, 'qualifying':qualifying}
@@ -236,7 +234,23 @@ def _calculate(o, policy, attachment):
                 eligible -= amount
     if sum(whole(t['rounding_cents'],minimum=-MAX_CENTS) for r in o['refunds'] for t in r['transactions']) != whole(o['refund_rounding_cents'],minimum=-MAX_CENTS):
         raise Review('refund_rounding_mismatch')
+    if (o['edited'] or full_refund(o)) and any(item['refunded'] != item['net'] for item in lines.values()):
+        raise Review('edit_or_exchange_review')
     basis_hash = fingerprint({'lines':sorted(basis,key=lambda x:x['id']), 'taxes_included':o['taxes_included'],
         'total_cents':total, 'created_at':created.isoformat(), 'processed_at':processed.isoformat(),
         'location_id':location, 'source':o['source'], 'currency':o['currency']})
     return Entitlement('eligible', 'calculated', eligible, (eligible+50)//100, basis_hash)
+
+
+def full_refund(o):
+    """Whole-sale proof; callers must also run calculate's allocation validation.
+
+    Zero eligible merchandise alone does not prove that gift cards, shipping,
+    taxes and payment rounding were returned. POS can mark full returns edited.
+    """
+    return bool(o['refunds'] and o['financial_status'] == 'REFUNDED'
+        and not o['exchanges'] and o['lines']
+        and sum(whole(t['cents']) for r in o['refunds'] for t in r['transactions']) == whole(o['received_cents'])
+        and all(sum(whole(p['quantity']) for r in o['refunds'] for p in r['lines']
+                    if p['line_id'] == line['id']) == whole(line['quantity'])
+                for line in o['lines']))

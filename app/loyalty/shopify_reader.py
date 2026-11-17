@@ -210,7 +210,9 @@ def project_order(h,lines,refunds,shop_id,return_details=None):
             result['lines'].append(dict(id=gid('LineItem',l['id']),quantity=whole(l['quantity']),
                 original_cents=money(l['originalTotalSet']),discounts_cents=[money(d['allocatedAmountSet']) for d in l['discountAllocations']],
                 tax_cents=sum(money(t['priceSet']) for t in l['taxLines']),gift_card=l['isGiftCard'],
-                merchandise=l['requiresShipping'] and bool(l['variant'] and gid('ProductVariant',l['variant']['id']))))
+                # Physical custom-sale merchandise has no catalog variant.
+                # Shopify's gift-card flag remains a separate exclusion.
+                merchandise=l['requiresShipping']))
         for tx in txs:
             result['payments'].append(dict(id=gid('OrderTransaction',tx['id']),kind=tx['kind'],status=tx['status'],cents=money(tx['amountSet']),rounding_cents=money(tx['amountRoundingSet'],signed=True) if tx['amountRoundingSet'] else 0,processed_at=tx['processedAt']))
         refund_tx_ids=set()

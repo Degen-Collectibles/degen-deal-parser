@@ -75,7 +75,7 @@ class POSAccess:
                 raise ValueError()
             if not 0 < claims['before'] <= claims['upper'] or claims['count'] < 1:
                 raise ValueError()
-            if not isinstance(claims['balance'],str) or not re.fullmatch(r'[0-9]{1,30}', claims['balance']):
+            if not isinstance(claims['balance'],str) or not re.fullmatch(r'-?[0-9]{1,30}', claims['balance']):
                 raise ValueError()
             if not isinstance(claims['as_of'],str) or len(claims['as_of']) > 40:
                 raise ValueError()

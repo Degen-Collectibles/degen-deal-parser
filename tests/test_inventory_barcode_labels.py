@@ -542,10 +542,15 @@ def test_wraparound_labels_fit_in_print_media(tmp_path):
         html_path.write_text(html, encoding="utf-8")
         return html_path
 
+    pw = None
     try:
         pw = sync_playwright().start()
         browser = pw.chromium.launch(headless=True)
     except PlaywrightError as exc:
+        # A skipped browser launch must not leave Playwright's event loop
+        # running and break every subsequent asyncio/unittest test.
+        if pw is not None:
+            pw.stop()
         pytest.skip(f"playwright chromium is not available: {exc}")
 
     try:

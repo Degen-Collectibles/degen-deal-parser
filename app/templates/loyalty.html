@@ -47,6 +47,56 @@
 <button type="submit">Look up</button>
 </form>
 {% if balance is not none %}<p class="balance">{{ balance }} points</p>{% endif %}
+{% if (can_correct or can_replay) and rewards %}
+<section><h2>Reward redemptions</h2>
+<p>Pending rewards reserve points until the sale is verified. Verified partial refunds retain the reward debit and allow future rewards. Other evidence conflicts require review.</p>
+{% for reward in rewards %}<article>
+<strong>Reward {{ reward.id }} · {{ display_reason(reward.state) }}</strong>
+<p>Customer {{ display_id(reward.customer_id) }} · {{ reward.points }} points · {{ display_money(reward.discount_cents) }} discount</p>
+<p>{{ display_reason(reward.reason) }}</p>
+{% if reward.failure_count %}<p>Failed reconciliation attempts: {{ reward.failure_count }}</p>{% endif %}
+{% if can_replay and reward.state == 'review' %}
+<form method="post" action="/loyalty/rewards/retry">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="redemption_id" value="{{ reward.id }}">
+<label>Review reference <input name="reference" required maxlength="80" pattern="[A-Za-z0-9_-]+"></label>
+<button type="submit">Recheck Shopify evidence</button>
+<p>Queues a fresh check when reconciliation is enabled. For an unspent reward, this also requests code deactivation. Points remain held for a separate verified release.</p>
+</form>
+{% endif %}
+{% if can_correct and reward.state == 'review' and reward.observed_order_json != '{}' and (not reward.debit_ledger_id or reward.manual_decision_hash) and not reward.restore_ledger_id %}
+<form method="post" action="/loyalty/rewards/adjudicate">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="redemption_id" value="{{ reward.id }}">
+<input type="hidden" name="evidence_hash" value="{{ reward_observation_hash(reward) }}">
+<p>Shopify order {{ display_id(reward.order_id) }} needs an exception decision.</p>
+<label>Review reference <input name="reference" required maxlength="80" pattern="[A-Za-z0-9_-]+"></label>
+<label>Decision <select name="decision"><option value="debit">Charge the reward points for the verified sale</option><option value="restore">Record use and restore after a verified full refund</option></select></label>
+<label><input type="checkbox" name="exception_verified" value="yes" required> I verified this customer's paid sale, the reward discount and all refunds in Shopify. I approve this exception. Purchase earnings must be reversed before restoring a refunded reward.</label>
+<button type="submit">Apply reviewed reward decision</button>
+</form>
+{% endif %}
+{% if can_correct and reward.state == 'review' and reward.debit_ledger_id and not reward.restore_ledger_id and not reward.manual_decision_hash %}
+<form method="post" action="/loyalty/rewards/resolve">
+<input type="hidden" name="evidence_hash" value="{{ reward_evidence_hash(reward) }}">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="redemption_id" value="{{ reward.id }}">
+<label>Review reference <input name="reference" required maxlength="80" pattern="[A-Za-z0-9_-]+"></label>
+<label><input type="checkbox" name="debit_verified" value="yes" required> I reviewed the sale and refunds. Keep the existing reward debit; no points are restored.</label>
+<button type="submit">Resolve review and retain debit</button>
+</form>
+{% endif %}
+{% if can_correct and reward.state == 'review' and reward.reason == 'unused_code_requires_review' and not reward.debit_ledger_id %}
+<form method="post" action="/loyalty/rewards/release">
+<input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="redemption_id" value="{{ reward.id }}">
+<label>Review reference <input name="reference" required maxlength="80" pattern="[A-Za-z0-9_-]+"></label>
+<label><input type="checkbox" name="registers_verified" value="yes" required> I verified all registers have synced and no sale used this reward.</label>
+<button type="submit">Release unused reserved points</button>
+</form>
+{% endif %}
+</article>{% endfor %}</section>
+{% endif %}
 <p class="small muted">{% for status,count in counts %}{{ display_reason(status) }}: {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
 <section><h2>Order entitlements</h2><div class="orders">
 {% for row in rows %}<article>
@@ -85,7 +135,7 @@
 <p class="small">Order #{{ display_id(history_orders.get(entry.entitlement_id)) }}</p>
 <p class="small muted">{{ entry.created_at.strftime('%b %d, %Y · %H:%M UTC') }}</p>
 {% if diagnostics %}<details class="technical"><summary>Administrator evidence</summary><p>Entry {{ entry.id }} · revision {{ entry.revision }} · {{ entry.rule_version }}</p><pre>{{ entry.evidence_json }}</pre></details>{% endif %}</div>
-<div class="history-points"><span class="points">{{ '%+d'|format(entry.delta) }}</span><p class="small muted">{{ entry.resulting_points }} on order</p></div></div>
+<div class="history-points"><span class="points">{{ '%+d'|format(entry.delta) }}</span><p class="small muted">{{ entry.resulting_points }} earned points on order</p></div></div>
 {% else %}<p>No posted points.</p>{% endfor %}</section>
 <nav aria-label="Loyalty pages">{% if page %}<a href="/loyalty?page={{ page-1 }}&customer_id={{ customer_id|urlencode }}&order_id={{ order_id|urlencode }}">Previous</a> · {% endif %}<a href="/loyalty?page={{ page+1 }}&customer_id={{ customer_id|urlencode }}&order_id={{ order_id|urlencode }}">Next</a></nav>
 {% if can_replay %}<section><h2>Reconciliation and exceptions</h2>
@@ -98,7 +148,7 @@
 <details class="technical"><summary>Receipt details</summary><p>Receipt {{ item.id }} · {{ item.attempts }} attempts · {{ item.received_at }} UTC</p><pre>{{ item.evidence_json }}</pre></details></article>{% else %}<p>No pending receipts.</p>{% endfor %}
 </section>{% endif %}
 {% if diagnostics %}<section><details class="technical"><summary>Activation and system status</summary><p>Receiving: {{ 'on' if receiving else 'off' }} · Processing: {{ 'on' if processing else 'off' }} · Posting: {{ 'on' if posting else 'off' }}</p><p>{{ gates|join(', ') }}</p></details></section>{% endif %}
-<p class="muted small">Online and TikTok purchases are excluded. Points have no redemption value in this release. Smile remains unchanged.</p>
+<p class="muted small">Online and TikTok purchases are excluded. Rewards are available only after the separate reward activation checks pass. Smile remains unchanged.</p>
 </div></main>
 {% include '_csrf_bootstrap.html' %}
 </body></html>
