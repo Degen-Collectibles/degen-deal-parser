@@ -69,7 +69,7 @@ def build_router(engine, settings, provider_factory=None):
                 raise RedemptionError('invalid_request')
             data=await asyncio.to_thread(redemptions.overview,access.shop,customer_id)
             pending=await asyncio.to_thread(redemptions.owned_pending,access.shop,customer_id,session)
-            return response(dict(data,customer_id=customer_id,reward=Reward.from_settings(settings).public(),pending=pending,
+            return response(dict(data,customer_id=customer_id,rewards=[reward.public() for reward in Reward.approved()],pending=pending,
                 issuance_enabled=not bool(redemption_gates(settings)) and await asyncio.to_thread(redemptions.issuance_ready, access.shop)))
         except Exception as exc:return failure(exc)
 
@@ -90,11 +90,14 @@ def build_router(engine, settings, provider_factory=None):
             if kind in ('eligibility','reserve'):
                 if redemption_gates(settings) or not await asyncio.to_thread(redemptions.issuance_ready, access.shop):
                     raise RedemptionError('redemption_unavailable')
-                expected={'action','variant_ids'} | ({'request_key'} if kind=='reserve' else set())
+                expected={'action','variant_ids'} | ({'request_key','reward_points'} if kind=='reserve' else set())
                 custom = data.get('custom_sales') is True
                 if custom: expected.add('custom_sales')
                 if set(data)!=expected: raise RedemptionError('invalid_request')
-                try: requested=variant_ids(data['variant_ids'], allow_empty=custom)
+                try:
+                    requested=variant_ids(data['variant_ids'], allow_empty=custom)
+                    # The register names the reward by its point cost; the terms come from the server.
+                    reward=Reward.for_points(data['reward_points']) if kind=='reserve' else None
                 except ValueError: raise RedemptionError('invalid_request') from None
             elif kind in ('cancel','refresh') and set(data)=={'action','redemption_id'} and type(data['redemption_id']) is int:
                 row=await asyncio.to_thread(redemptions.get,access.shop,data['redemption_id'],customer_id,session)
@@ -110,7 +113,7 @@ def build_router(engine, settings, provider_factory=None):
                         return response({'eligible_variant_ids':eligibility['eligible'],'taxes_included':False,
                                          'custom_sales':eligibility.get('custom_sales',False)})
                     row=await asyncio.to_thread(redemptions.reserve,access.shop,customer_id,session,
-                        data['request_key'],Reward.from_settings(settings),eligibility=eligibility)
+                        data['request_key'],reward,eligibility=eligibility)
                 row=await asyncio.wait_for(prepare(redemptions,provider,row) if kind=='reserve'
                                            else reconcile(redemptions,provider,row, allow_prepare=not bool(redemption_gates(settings)),
                                                           cashier_cancel=kind=='cancel'),timeout=45)

@@ -171,6 +171,7 @@ class Redemptions:
             previous = s.exec(select(Redemption).where(Redemption.shop == shop, Redemption.request_key == request_key)).first()
             if previous:
                 if (previous.customer_id != customer or previous.session_hash != session_hash
+                    or previous.points != reward.points
                     or (eligibility is not None and previous.eligibility_json != dump(eligibility))):
                     raise RedemptionError('request_key_conflict')
                 return previous
@@ -205,7 +206,8 @@ class Redemptions:
             row=s.exec(select(Redemption).where(Redemption.shop==shop,
                 Redemption.customer_id==gid('Customer',customer),Redemption.session_hash==session_hash,
                 blocking_review()).order_by(Redemption.id.desc()).limit(1)).first()
-            return dict(redemption_id=row.id,state=row.state,request_key=row.request_key,can_cancel=row.debit_ledger_id is None) if row else None
+            return dict(redemption_id=row.id,state=row.state,request_key=row.request_key,can_cancel=row.debit_ledger_id is None,
+                points=row.points,discount_cents=row.discount_cents,minimum_cents=row.minimum_cents) if row else None
 
     def transition(self, shop, id, state, *, provider_id=None, reason='', now=None):
         allowed = {'ready': ('reserved', 'ready'), 'cancelling': ('reserved', 'ready', 'cancelling', 'review'),

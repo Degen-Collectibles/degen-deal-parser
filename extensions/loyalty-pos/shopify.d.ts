@@ -47,3 +47,21 @@ declare module './src/CartRewards.tsx' {
   const shopify: import('@shopify/ui-extensions/pos.cart.line-item-details.action.render').Api;
   const globalThis: { shopify: typeof shopify };
 }
+
+//@ts-ignore
+declare module './src/ScanTile.tsx' {
+  const shopify: import('@shopify/ui-extensions/pos.home.tile.render').Api;
+  const globalThis: { shopify: typeof shopify };
+}
+
+//@ts-ignore
+declare module './src/ScanModal.tsx' {
+  const shopify: import('@shopify/ui-extensions/pos.home.modal.render').Api;
+  const globalThis: { shopify: typeof shopify };
+}
+
+//@ts-ignore
+declare module './src/MemberScan.tsx' {
+  const shopify: import('@shopify/ui-extensions/pos.home.modal.render').Api;
+  const globalThis: { shopify: typeof shopify };
+}

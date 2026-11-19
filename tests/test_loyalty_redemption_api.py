@@ -23,16 +23,16 @@ def client(store,enabled=True):
 
 def test_disabled_has_no_side_effects(store):
     c=client(store,False)
-    assert c.post(PATH,json={'action':'reserve','request_key':'test_request_0001','variant_ids':['gid://shopify/ProductVariant/11']}).status_code==401
+    assert c.post(PATH,json={'action':'reserve','reward_points':500,'request_key':'test_request_0001','variant_ids':['gid://shopify/ProductVariant/11']}).status_code==401
     assert c.post(PATH,headers={'Authorization':'Bearer '+token()},
-        json={'action':'reserve','request_key':'test_request_0001','variant_ids':['gid://shopify/ProductVariant/11']}).status_code==503
+        json={'action':'reserve','reward_points':500,'request_key':'test_request_0001','variant_ids':['gid://shopify/ProductVariant/11']}).status_code==503
 
 def test_auth_scope_body_and_idempotency(store):
     add_entry(store.engine,1000)
     c=client(store);headers={'Authorization':'Bearer '+token()}
     assert c.get(PATH).status_code==401
     assert c.get(PATH,headers=dict(Authorization='Bearer '+token(aud='other'))).status_code==401
-    data={'action':'reserve','request_key':'test_request_0001','variant_ids':['gid://shopify/ProductVariant/11']}
+    data={'action':'reserve','reward_points':500,'request_key':'test_request_0001','variant_ids':['gid://shopify/ProductVariant/11']}
     a=c.post(PATH,headers=headers,json=data);assert a.status_code==200,a.text
     b=c.post(PATH,headers=headers,json=data);assert a.json()==b.json()
     result=c.get(PATH,headers=headers).json()
@@ -63,7 +63,7 @@ def test_missing_provider_token_blocks_before_reservation(store,monkeypatch):
     app=FastAPI();app.include_router(build_router(store.engine,settings))
     c=TestClient(app)
     assert c.post(PATH,headers={'Authorization':'Bearer '+token()},
-        json={'action':'reserve','request_key':'test_request_0001','variant_ids':['gid://shopify/ProductVariant/11']}).status_code==503
+        json={'action':'reserve','reward_points':500,'request_key':'test_request_0001','variant_ids':['gid://shopify/ProductVariant/11']}).status_code==503
     assert Redemptions(store).overview(SHOP,'101')['reserved_points']==0
 
 
@@ -71,12 +71,12 @@ def test_pause_blocks_new_issuance_but_allows_existing_status_and_cancel(store):
     add_entry(store.engine,1000)
     headers={'Authorization':'Bearer '+token()}
     live=client(store)
-    row=live.post(PATH,headers=headers,json={'action':'reserve','request_key':'pause_request_001','variant_ids':['gid://shopify/ProductVariant/11']}).json()
+    row=live.post(PATH,headers=headers,json={'action':'reserve','reward_points':500,'request_key':'pause_request_001','variant_ids':['gid://shopify/ProductVariant/11']}).json()
     paused=client(store,False)
     state=paused.get(PATH,headers=headers)
     assert state.status_code==200 and state.json()['issuance_enabled'] is False
     assert state.json()['pending']['redemption_id']==row['redemption_id']
-    assert paused.post(PATH,headers=headers,json={'action':'reserve','request_key':'pause_request_002','variant_ids':['gid://shopify/ProductVariant/11']}).status_code==503
+    assert paused.post(PATH,headers=headers,json={'action':'reserve','reward_points':500,'request_key':'pause_request_002','variant_ids':['gid://shopify/ProductVariant/11']}).status_code==503
     checked=paused.post(PATH,headers=headers,json={'action':'refresh','redemption_id':row['redemption_id']})
     assert checked.status_code==200 and checked.json()['state']=='review'
     assert paused.get(PATH,headers=headers).json()['reserved_points']==500
@@ -91,7 +91,7 @@ def test_malformed_json_is_a_client_error(store):
 def test_register_cancel_frees_points_when_provider_confirms_unused(store):
     add_entry(store.engine,1000)
     c=client(store);headers={'Authorization':'Bearer '+token()}
-    reserve={'action':'reserve','request_key':'cancel_request_001','variant_ids':['gid://shopify/ProductVariant/11']}
+    reserve={'action':'reserve','reward_points':500,'request_key':'cancel_request_001','variant_ids':['gid://shopify/ProductVariant/11']}
     row=c.post(PATH,headers=headers,json=reserve).json()
     # Without positive confirmation the hold stays for review, as before.
     held=c.post(PATH,headers=headers,json={'action':'cancel','redemption_id':row['redemption_id']})
@@ -114,7 +114,7 @@ def test_register_cancel_with_confirmation_allows_a_new_reward(store):
         async def confirmed_unused(self,row):return True
     app=FastAPI();app.include_router(build_router(store.engine,settings,lambda _:Provider()))
     c=TestClient(app);headers={'Authorization':'Bearer '+token()}
-    reserve={'action':'reserve','request_key':'cancel_request_001','variant_ids':['gid://shopify/ProductVariant/11']}
+    reserve={'action':'reserve','reward_points':500,'request_key':'cancel_request_001','variant_ids':['gid://shopify/ProductVariant/11']}
     row=c.post(PATH,headers=headers,json=reserve).json()
     done=c.post(PATH,headers=headers,json={'action':'cancel','redemption_id':row['redemption_id']})
     assert done.status_code==200,done.text

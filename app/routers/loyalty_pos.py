@@ -138,6 +138,8 @@ def build_router(engine, settings):
         payload['next_cursor'] = access.encode_cursor(next_page) if next_page else None
         from ..loyalty.reward_policy import redemption_gates
         payload['rewards_available'] = not bool(redemption_gates(settings, issuing=False))
+        from ..loyalty.wallet import gates as wallet_gates
+        payload['wallet_card_available'] = not bool(wallet_gates(settings))
         payload['posting_paused'] = not (settings.loyalty_processing_enabled and settings.loyalty_posting_enabled)
         return JSONResponse(payload, headers={'Cache-Control':'no-store'})
 

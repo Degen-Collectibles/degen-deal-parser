@@ -112,7 +112,7 @@ def test_api_rejects_bad_catalog_before_holding_points(store):
     c=TestClient(app); headers={'Authorization':'Bearer '+token()}
     path='/api/loyalty/pos/customers/101/rewards'
     for data in [{'action':'eligibility','variant_ids':[V1]},
-                 {'action':'reserve','request_key':'catalog_failure_001','variant_ids':[V1]}]:
+                 {'action':'reserve','reward_points':500,'request_key':'catalog_failure_001','variant_ids':[V1]}]:
         result=c.post(path,headers=headers,json=data)
         assert result.status_code==409 and result.json()['error']=='catalog_incomplete'
     assert c.get(path,headers=headers).json()['reserved_points']==0

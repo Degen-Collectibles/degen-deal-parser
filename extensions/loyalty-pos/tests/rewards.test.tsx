@@ -13,8 +13,9 @@ function fixture() {
   return api as unknown as ContextApi;
 }
 const status={customer_id:'101',available_points:500,reserved_points:0,needs_review:false,
-  reward:{points:500,discount_cents:1000,minimum_cents:10000}};
-const reply=(body:object)=>new Response(JSON.stringify('redemption_id' in body?{eligible_variant_ids:['gid://shopify/ProductVariant/11'],...body}:body));
+  rewards:[{points:500,discount_cents:1000,minimum_cents:5000}]};
+const reply=(body:object)=>new Response(JSON.stringify('redemption_id' in body?{eligible_variant_ids:['gid://shopify/ProductVariant/11'],
+  points:500,discount_cents:1000,minimum_cents:5000,...body}:body));
 function stubFetch(fetcher:any) {
   vi.stubGlobal('fetch',(url:any,options:any)=>{
     if(options?.body && JSON.parse(options.body).action==='eligibility')return Promise.resolve(reply({eligible_variant_ids:['gid://shopify/ProductVariant/11'],taxes_included:false}));
@@ -65,7 +66,7 @@ test('reserves before applying single-use code and never sends price or points',
   render(<RewardView api={api}/>);
   fireEvent.click(await screen.findByText('Use 500 points for $10.00 off'));
   await waitFor(()=>expect(api.cart!.addCartCodeDiscount).toHaveBeenCalledWith('DEGEN-'+'A'.repeat(32)));
-  expect(Object.keys(JSON.parse(fetcher.mock.calls[1][1].body)).sort()).toEqual(['action','request_key','variant_ids']);
+  expect(Object.keys(JSON.parse(fetcher.mock.calls[1][1].body)).sort()).toEqual(['action','request_key','reward_points','variant_ids']);
   expect(await screen.findByText(/Reward applied/)).toBeTruthy();
   expect(screen.getByText('0 available · 500 reserved')).toBeTruthy();
 });
@@ -154,7 +155,7 @@ test('cart changes during application cannot announce success',async()=>{
 test('paused issuance keeps an existing reward visible for recovery',async()=>{
   const api=fixture();
   stubFetch(vi.fn().mockResolvedValueOnce(reply({...status,issuance_enabled:false,
-    pending:{redemption_id:1,state:'ready',request_key:'existing_request_001'}})));
+    pending:{redemption_id:1,state:'ready',request_key:'existing_request_001',points:500,discount_cents:1000,minimum_cents:5000}})));
   render(<RewardView api={api}/>);
   expect(await screen.findByText('Check redemption')).toBeTruthy();
   expect(screen.getByText('Use 500 points for $10.00 off').hasAttribute('disabled')).toBe(true);
@@ -192,13 +193,13 @@ test('custom-sale carts reject services even when merchandise reaches the minimu
 
 test('an ineligible preflight never reserves points or applies a code',async()=>{
   const api=fixture();const cart=api.cart!.current.value;
-  cart.lineItems[0].price=50;
-  cart.lineItems.push({...cart.lineItems[0],uuid:'service',variantId:12,price:50});
+  cart.lineItems[0].price=40;
+  cart.lineItems.push({...cart.lineItems[0],uuid:'service',variantId:12,price:60});
   const fetcher=vi.fn().mockResolvedValueOnce(reply(status)).mockResolvedValueOnce(reply({
     eligible_variant_ids:['gid://shopify/ProductVariant/11'],taxes_included:false}));
   vi.stubGlobal('fetch',fetcher);render(<RewardView api={api}/>);
   fireEvent.click(await screen.findByText('Use 500 points for $10.00 off'));
-  expect(await screen.findByText(/At least \$100\.00 of eligible physical merchandise/)).toBeTruthy();
+  expect(await screen.findByText(/At least \$50\.00 of eligible physical merchandise/)).toBeTruthy();
   expect(fetcher).toHaveBeenCalledTimes(2);
   expect(JSON.parse(fetcher.mock.calls[1][1].body).action).toBe('eligibility');
   expect(api.cart!.addCartCodeDiscount).not.toHaveBeenCalled();
@@ -287,4 +288,54 @@ test('custom-only reward waits for the cashier and verifies explicit custom scop
   expect(api.cart!.addCartCodeDiscount).toHaveBeenCalledExactlyOnceWith(code);
   expect(JSON.parse(fetcher.mock.calls[1][1].body)).toEqual({action:'eligibility',variant_ids:[],custom_sales:true});
   expect(JSON.parse(fetcher.mock.calls[2][1].body)).toMatchObject({action:'reserve',variant_ids:[],custom_sales:true});
+});
+const three={...status,available_points:600,rewards:[{points:1000,discount_cents:2500,minimum_cents:12500},
+  {points:250,discount_cents:500,minimum_cents:2500},{points:500,discount_cents:1000,minimum_cents:5000}]};
+test('offers each reward only when the points and the cart both cover it',async()=>{
+  const api=fixture();api.cart!.current.value.subtotal='40.00';
+  stubFetch(vi.fn().mockResolvedValueOnce(reply(three)));
+  render(<RewardView api={api}/>);
+  // $40 cart, 600 points: only the 250-point reward fits.
+  expect((await screen.findByText('Use 250 points for $5.00 off')).hasAttribute('disabled')).toBe(false);
+  expect(screen.getByText('Use 500 points for $10.00 off').hasAttribute('disabled')).toBe(true);
+  expect(screen.getByText('Use 1000 points for $25.00 off').hasAttribute('disabled')).toBe(true);
+  expect(screen.getByText('250 points = $5.00 off $25.00+')).toBeTruthy();
+  expect(screen.getByText('1000 points = $25.00 off $125.00+')).toBeTruthy();
+  // Smallest first, whatever order the server sent.
+  expect(screen.getAllByText(/^Use \d+ points for/).map(b=>b.textContent)).toEqual(
+    ['Use 250 points for $5.00 off','Use 500 points for $10.00 off','Use 1000 points for $25.00 off']);
+});
+test('the chosen reward is the one reserved, applied and held',async()=>{
+  const api=fixture();
+  vi.mocked(api.cart!.addCartCodeDiscount).mockImplementation(async code=>{
+    api.cart!.current.value.cartDiscounts=[{amount:5,discountDescription:code}];});
+  const fetcher=vi.fn().mockResolvedValueOnce(reply(three)).mockResolvedValueOnce(reply({
+    redemption_id:1,state:'ready',code:'DEGEN-'+'A'.repeat(32),points:250,discount_cents:500,minimum_cents:2500}));
+  stubFetch(fetcher);
+  render(<RewardView api={api}/>);
+  fireEvent.click(await screen.findByText('Use 250 points for $5.00 off'));
+  expect(await screen.findByText(/Reward applied/)).toBeTruthy();
+  expect(JSON.parse(fetcher.mock.calls[1][1].body).reward_points).toBe(250);
+  expect(screen.getByText('350 available · 250 reserved')).toBeTruthy();
+  // Once one reward is held, the other rewards are no longer offered for this checkout.
+  expect(screen.queryByText('Use 500 points for $10.00 off')).toBeNull();
+  expect(screen.queryByText('Use 1000 points for $25.00 off')).toBeNull();
+});
+test('a reply with different terms than the chosen reward is never applied',async()=>{
+  const api=fixture();
+  stubFetch(vi.fn().mockResolvedValueOnce(reply(three)).mockResolvedValueOnce(reply({
+    redemption_id:1,state:'ready',code:'DEGEN-'+'A'.repeat(32),points:500,discount_cents:1000,minimum_cents:5000})));
+  render(<RewardView api={api}/>);
+  fireEvent.click(await screen.findByText('Use 250 points for $5.00 off'));
+  expect(await screen.findByText(/Reward terms changed/)).toBeTruthy();
+  expect(api.cart!.addCartCodeDiscount).not.toHaveBeenCalled();
+});
+test('terms above the 20% cap, or duplicated, are refused',async()=>{
+  stubFetch(vi.fn().mockResolvedValueOnce(reply({...status,rewards:[{points:500,discount_cents:1000,minimum_cents:4999}]})));
+  render(<RewardView api={fixture()}/>);
+  expect(await screen.findByText('Invalid reward terms.')).toBeTruthy();
+  cleanup();
+  stubFetch(vi.fn().mockResolvedValueOnce(reply({...status,rewards:[status.rewards[0],status.rewards[0]]})));
+  render(<RewardView api={fixture()}/>);
+  expect(await screen.findByText('Invalid reward terms.')).toBeTruthy();
 });

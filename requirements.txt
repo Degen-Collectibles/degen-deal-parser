@@ -23,6 +23,7 @@ Pillow
 opencv-python-headless==4.13.0.92
 imagehash==4.3.2
 python-barcode
+qrcode
 firecrawl-py
 browser-use
 playwright

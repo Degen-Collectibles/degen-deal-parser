@@ -28,6 +28,7 @@ def install_schema(engine):
         }.items():
             if name not in columns:
                 connection.execute(text(f'ALTER TABLE loyalty_redemption ADD COLUMN {name} {definition}'))
+        align_redemption_money_rule(connection)
         if engine.dialect.name == 'sqlite':
             for action in ('UPDATE','DELETE'):
                 connection.execute(text(f"CREATE TRIGGER IF NOT EXISTS loyalty_ledger_no_{action.lower()} BEFORE {action} ON loyalty_ledger BEGIN SELECT RAISE(ABORT, 'loyalty_ledger_append_only'); END"))
@@ -40,6 +41,34 @@ def install_schema(engine):
             raise RuntimeError('loyalty_unsupported_database')
     if not schema_ready(engine):
         raise RuntimeError('loyalty_schema_not_ready')
+
+
+MONEY_RULE = 'ck_loyalty_redemption_money'
+
+
+def align_redemption_money_rule(connection):
+    """Bring an existing table's reward cap rule in line with the model (10% became 20%).
+
+    The new rule is looser, so every existing row already satisfies it.
+    """
+    table = next(t for t in TABLES if t.name == 'loyalty_redemption')
+    expected = next(c for c in table.constraints if c.name == MONEY_RULE)
+    current = {c['name']: c['sqltext'] for c in inspect(connection).get_check_constraints(table.name)}.get(MONEY_RULE)
+    if current is not None and normalized_check(current) == normalized_check(expected.sqltext):
+        return
+    if connection.dialect.name == 'postgresql':
+        connection.execute(text(f'ALTER TABLE loyalty_redemption DROP CONSTRAINT IF EXISTS {MONEY_RULE}, '
+                                f'ADD CONSTRAINT {MONEY_RULE} CHECK ({expected.sqltext})'))
+    elif connection.dialect.name == 'sqlite':
+        # SQLite cannot change a check in place: rebuild the table and copy every row.
+        names = ', '.join(c.name for c in table.columns)
+        connection.execute(text('ALTER TABLE loyalty_redemption RENAME TO loyalty_redemption_old'))
+        for (index,) in connection.execute(text("SELECT name FROM sqlite_master WHERE type='index' "
+                                                "AND tbl_name='loyalty_redemption_old' AND sql IS NOT NULL")).all():
+            connection.execute(text(f'DROP INDEX "{index}"'))
+        table.create(connection)
+        connection.execute(text(f'INSERT INTO loyalty_redemption ({names}) SELECT {names} FROM loyalty_redemption_old'))
+        connection.execute(text('DROP TABLE loyalty_redemption_old'))
 
 
 def normalized_check(sql):

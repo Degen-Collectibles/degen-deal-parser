@@ -1,11 +1,12 @@
 import {useEffect, useRef, useState} from 'preact/hooks';
 import {RewardView} from './RewardView';
+import {WalletEnroll} from './WalletEnroll';
 import type {Api as BlockApi} from '@shopify/ui-extensions/pos.customer-details.block.render';
 import type {} from '@shopify/ui-extensions/pos.customer-details.action.render';
 
 export type ContextApi = Pick<BlockApi, 'customer' | 'session' | 'connectivity'> & {cart?: BlockApi['cart'];action?: Pick<BlockApi['action'], 'presentModal'>};
 type Entry = {delta_points:string;label:string;created_at:string};
-type Snapshot = {customer_id:string;balance_points:string;has_history:boolean;as_of:string;checked_at:string|null;needs_review:boolean;updates_pending:boolean;posting_paused:boolean;rewards_available?:boolean;next_cursor:string|null;history:Entry[]};
+type Snapshot = {customer_id:string;balance_points:string;has_history:boolean;as_of:string;checked_at:string|null;needs_review:boolean;updates_pending:boolean;posting_paused:boolean;rewards_available?:boolean;wallet_card_available?:boolean;next_cursor:string|null;history:Entry[]};
 const unavailable = 'Loyalty is unavailable. Try again when connected.';
 const integer = /^-?(0|[1-9][0-9]{0,29})$/;
 function unit(value:string) {return value==='1'||value==='-1'?'point':'points';}
@@ -33,6 +34,7 @@ export function LoyaltyView({api,mode}:{api:ContextApi;mode:'block'|'history'}) 
   const [key,setKey]=useState(()=>context(api));
   const [cursor,setCursor]=useState<string|null>(null);
   const [refresh,setRefresh]=useState(0);
+  const [card,setCard]=useState(false);
   const [state,setState]=useState<{key:string;data?:Snapshot;error?:string}>({key});
   const generation=useRef(0);
   const abort=useRef<AbortController>();
@@ -40,7 +42,7 @@ export function LoyaltyView({api,mode}:{api:ContextApi;mode:'block'|'history'}) 
     const changed=()=>{
       const next=context(api);
       if (next!==key) {
-        ++generation.current;abort.current?.abort();setState({key:next});setCursor(null);setKey(next);
+        ++generation.current;abort.current?.abort();setState({key:next});setCursor(null);setCard(false);setKey(next);
       }
     };
     const unsubscribe=api.session.staffMember.subscribe(changed);
@@ -125,6 +127,13 @@ export function LoyaltyView({api,mode}:{api:ContextApi;mode:'block'|'history'}) 
       visible.error && <s-button slot="secondary-actions" variant="secondary" onClick={retry}>Refresh</s-button>}
   </s-pos-block>:<s-page heading="Loyalty activity">
     {(data || visible.error) && <s-button slot="secondary-actions" variant="secondary" onClick={retry}>Refresh</s-button>}
-    <s-scroll-box><s-box padding="base">{api.cart && state.data?.rewards_available === true && <RewardView key={key} api={api}/>} {content}</s-box></s-scroll-box>
+    <s-scroll-box><s-box padding="base">{card && data?.wallet_card_available===true?
+      // The sign-up code belongs to the customer on screen; it is dropped the
+      // moment the customer, staff member or connection changes.
+      <WalletEnroll key={key} api={api} onBack={()=>setCard(false)}/>:<>
+      {api.cart && state.data?.rewards_available === true && <RewardView key={key} api={api}/>} {content}
+      {data?.wallet_card_available===true && <s-box paddingBlockStart="base">
+        <s-button variant="secondary" onClick={()=>setCard(true)}>Add rewards card to phone</s-button>
+      </s-box>}</>}</s-box></s-scroll-box>
   </s-page>;
 }

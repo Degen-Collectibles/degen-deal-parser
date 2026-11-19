@@ -89,7 +89,11 @@ def create_app(engine,secret,host,deadline,provider_factory):
         SHOPIFY_STORE_DOMAIN=DEV_SHOP,LOYALTY_LAUNCH_AT='2026-09-01T00:00:00Z',
         LOYALTY_READ_ACCESS_VERIFIED=True,LOYALTY_EVIDENCE_RETENTION_DAYS=7,
         LOYALTY_BUDGET_CENTS=0,LOYALTY_EXCEPTION_OWNER='DEV test operator',
-        LOYALTY_LEDGER_RETENTION_DAYS=7,LOYALTY_BACKUP_RETENTION_DAYS=7)
+        LOYALTY_LEDGER_RETENTION_DAYS=7,LOYALTY_BACKUP_RETENTION_DAYS=7,
+        # Rewards-card scan: a throwaway key, so DEV codes die with this process.
+        LOYALTY_MEMBER_SCAN_ENABLED=True,LOYALTY_MEMBER_CODE_SECRET=__import__('secrets').token_urlsafe(48),
+        # Card sign-up links point at this preview's own public address.
+        LOYALTY_WALLET_ENROLLMENT_ENABLED=True,LOYALTY_CARD_BASE_URL='https://'+host)
     from app.loyalty.config import posting_gates, policy_from_settings
     rewards=Redemptions(Store(engine), posting_allowed=lambda: not posting_gates(settings),
         policy_getter=lambda: policy_from_settings(settings));stop=asyncio.Event()
@@ -118,13 +122,20 @@ def create_app(engine,secret,host,deadline,provider_factory):
             engine.dispose()
     app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
     app.include_router(reads(engine,settings));app.include_router(actions(engine,settings,provider_factory))
+    from app.routers.loyalty_member import build_router as member
+    from app.loyalty.member_codes import issue
+    app.include_router(member(engine,settings))
+    from app.routers.loyalty_wallet import build_router as wallet
+    app.include_router(wallet(engine,settings))
+    app.state.member_code=issue(engine,settings,DEV_SHOP,CUSTOMER)
     base='/api/loyalty/pos/customers/'+CUSTOMER
     @app.middleware('http')
     async def bounds(request:Request,call_next):
         if time.time()>=deadline:return JSONResponse({'error':'preview_expired'},503)
         if request.headers.get('host') not in (host,'127.0.0.1:8769','testserver'):
             return JSONResponse({'error':'invalid_host'},403)
-        if request.url.path not in ('/health',base,base+'/rewards'):
+        if (request.url.path not in ('/health',base,base+'/rewards',base+'/wallet-card','/api/loyalty/pos/member-codes/resolve')
+                and not request.url.path.startswith('/rewards/card/')):
             return JSONResponse({'error':'not_found'},404)
         response=await call_next(request);response.headers['Cache-Control']='no-store'
         return response
@@ -175,6 +186,7 @@ async def serve():
         install_schema(engine);seed(engine)
         app=create_app(engine,secret,host,manifest['deadline'],factory)
         print('Verified DEV checkout backend: Loyalty Test, 500 initial synthetic points; DEV scratch earning enabled.',flush=True)
+        print('DEV rewards-card code for Loyalty Test (make a QR code of it to scan): '+app.state.member_code,flush=True)
         await uvicorn.Server(uvicorn.Config(app,host='127.0.0.1',port=8769,access_log=False,loop='asyncio')).serve()
 
 if __name__=='__main__':
