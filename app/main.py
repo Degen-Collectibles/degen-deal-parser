@@ -621,6 +621,10 @@ from .routers.loyalty_pos import build_router as build_loyalty_pos_router
 app.include_router(build_loyalty_pos_router(engine, settings))
 from .routers.loyalty_redemption import build_router as build_loyalty_redemption_router
 app.include_router(build_loyalty_redemption_router(engine, settings))
+from .routers.loyalty_member import build_router as build_loyalty_member_router
+app.include_router(build_loyalty_member_router(engine, settings))
+from .routers.loyalty_wallet import build_router as build_loyalty_wallet_router
+app.include_router(build_loyalty_wallet_router(engine, settings))
 app.include_router(loyalty_router)
 app.include_router(shopify_loyalty_webhooks_router)
 
@@ -872,7 +876,8 @@ async def message_attachment_fallback(
 
 @app.middleware("http")
 async def attach_current_user(request: Request, call_next):
-    if is_public_path(request.url.path) or request.url.path.startswith("/api/loyalty/pos/customers/"):
+    if is_public_path(request.url.path) or request.url.path.startswith(
+            ("/api/loyalty/pos/customers/", "/api/loyalty/pos/member-codes/", "/rewards/card/")):
         request.state.current_user = None
         return await call_next(request)
     request.state.current_user = get_request_user(request)

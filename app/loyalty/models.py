@@ -133,7 +133,7 @@ class LoyaltyRedemption(SQLModel, table=True):
         UniqueConstraint('shop', 'order_id', name='uq_loyalty_redemption_order'),
         CheckConstraint("state IN ('reserved','ready','cancelling','cancelled','committed','restored','review')", name='ck_loyalty_redemption_state'),
         CheckConstraint('points > 0 AND points = CAST(points AS BIGINT)', name='ck_loyalty_redemption_points'),
-        CheckConstraint('discount_cents > 0 AND minimum_cents >= discount_cents * 10', name='ck_loyalty_redemption_money'),
+        CheckConstraint('discount_cents > 0 AND minimum_cents >= discount_cents * 5', name='ck_loyalty_redemption_money'),
     )
     id: Optional[int] = Field(default=None, primary_key=True)
     shop: str = Field(max_length=255, index=True)
@@ -168,4 +168,68 @@ class LoyaltyRedemption(SQLModel, table=True):
     checked_at: Optional[datetime] = Field(default=None, index=True)
 
 
-TABLES = [m.__table__ for m in (LoyaltyAccount,LoyaltyEntitlement,LoyaltyLedger,LoyaltyInbox,LoyaltyReconciliation,LoyaltyRedemption)]
+class LoyaltyMemberCode(SQLModel, table=True):
+    """Scannable member codes. Only a hash is stored; no contact fields.
+
+    Keyed by Shopify customer, not by loyalty account, so a card can exist
+    before the customer has earned anything. The newest generation that is
+    not revoked is the customer's current code.
+    """
+    __tablename__ = 'loyalty_member_code'
+    __table_args__ = (
+        UniqueConstraint('shop', 'customer_id', 'generation', name='uq_loyalty_member_code_generation'),
+        UniqueConstraint('shop', 'code_hash', name='uq_loyalty_member_code_hash'),
+        CheckConstraint('generation > 0', name='ck_loyalty_member_code_generation'),
+    )
+    id: Optional[int] = Field(default=None, primary_key=True)
+    shop: str = Field(max_length=255, index=True)
+    customer_id: str = Field(max_length=100, index=True)
+    generation: int
+    code_hash: str = Field(max_length=64)
+    created_at: datetime = Field(default_factory=now_utc)
+    revoked_at: Optional[datetime] = None
+
+
+class LoyaltyWalletEnrollment(SQLModel, table=True):
+    """Single-use, short-lived sign-up links issued at the register.
+
+    Only a hash of the link token is stored. A row ties the link to the
+    customer who was on the cashier's screen; no contact fields.
+    """
+    __tablename__ = 'loyalty_wallet_enrollment'
+    __table_args__ = (
+        UniqueConstraint('token_hash', name='uq_loyalty_wallet_enrollment_token'),
+        CheckConstraint('expires_at > created_at', name='ck_loyalty_wallet_enrollment_window'),
+    )
+    id: Optional[int] = Field(default=None, primary_key=True)
+    shop: str = Field(max_length=255, index=True)
+    customer_id: str = Field(max_length=100, index=True)
+    token_hash: str = Field(max_length=64)
+    session_hash: str = Field(max_length=64)
+    created_at: datetime = Field(default_factory=now_utc)
+    expires_at: datetime = Field(index=True)
+    used_at: Optional[datetime] = None
+    platform: Optional[str] = Field(default=None, max_length=20)
+
+
+class LoyaltyWalletCard(SQLModel, table=True):
+    """A rewards card issued to a phone wallet. No contact fields.
+
+    The serial is random and is the only identifier the wallet platform sees.
+    One customer may hold several cards (several phones, or a re-added card).
+    """
+    __tablename__ = 'loyalty_wallet_card'
+    __table_args__ = (
+        UniqueConstraint('platform', 'serial', name='uq_loyalty_wallet_card_serial'),
+        CheckConstraint("platform IN ('apple', 'google')", name='ck_loyalty_wallet_card_platform'),
+    )
+    id: Optional[int] = Field(default=None, primary_key=True)
+    shop: str = Field(max_length=255, index=True)
+    customer_id: str = Field(max_length=100, index=True)
+    platform: str = Field(max_length=20)
+    serial: str = Field(max_length=64)
+    created_at: datetime = Field(default_factory=now_utc)
+    revoked_at: Optional[datetime] = None
+
+
+TABLES = [m.__table__ for m in (LoyaltyAccount,LoyaltyEntitlement,LoyaltyLedger,LoyaltyInbox,LoyaltyReconciliation,LoyaltyRedemption,LoyaltyMemberCode,LoyaltyWalletEnrollment,LoyaltyWalletCard)]

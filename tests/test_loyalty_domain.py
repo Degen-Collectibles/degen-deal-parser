@@ -146,3 +146,14 @@ def test_rounding_does_not_disambiguate_two_different_tax_interpretations():
     r=refund(50);r['lines'][0]['tax_cents']=1;r['transactions'][0].update(cents=50,rounding_cents=-1)
     o['refunds']=[r];o['refund_rounding_cents']=-1
     with pytest.raises(Review,match='refund_allocation'):calculate(o,POLICY,attachment())
+
+@pytest.mark.parametrize('seconds,processed_matches,accepted', [(1,True,True),(2,True,False),(1,False,False)])
+def test_pos_tender_immediately_before_order_creation(seconds, processed_matches, accepted):
+    paid = SALE - timedelta(seconds=seconds)
+    o = order(processed_at=(paid if processed_matches else SALE).isoformat())
+    o['payments'][0]['processed_at'] = paid.isoformat()
+    if accepted:
+        assert calculate(o, POLICY, attachment()).points == 20
+    else:
+        with pytest.raises(Review, match='timestamp_conflict'):
+            calculate(o, POLICY, attachment())

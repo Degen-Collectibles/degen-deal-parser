@@ -25,3 +25,11 @@ target = "pos.cart.line-item-details.action.menu-item.render"
 [[extensions.targeting]]
 module = "./src/CartRewardModal.tsx"
 target = "pos.cart.line-item-details.action.render"
+
+[[extensions.targeting]]
+module = "./src/ScanTile.tsx"
+target = "pos.home.tile.render"
+
+[[extensions.targeting]]
+module = "./src/ScanModal.tsx"
+target = "pos.home.modal.render"

@@ -24,8 +24,15 @@ def test_native_checkout_auth_customer_bounds_and_restart_balance(store):
         assert client.get(base.replace(CUSTOMER,'101'),headers=headers).status_code==404
         assert client.get(base).status_code==401
         assert client.get(base,headers=headers).json()['balance_points']=='500'
+        scan=client.post('/api/loyalty/pos/member-codes/resolve',headers=headers,json={'code':app.state.member_code})
+        assert scan.status_code==200 and scan.json()=={'customer_id':CUSTOMER}
+        assert client.post('/api/loyalty/pos/member-codes/resolve',json={'code':app.state.member_code}).status_code==401
+        card=client.post(base+'/wallet-card',headers=headers).json()
+        assert card['url'].startswith('https://checkout.example.test/rewards/card/')
+        page=card['url'][len('https://checkout.example.test'):]
+        assert client.get(page).status_code==200 and client.get(page+'/qr.png').headers['content-type']=='image/png'
         assert client.get(base,headers=dict(headers,Host='evil.example')).status_code==403
-        result=client.post(base+'/rewards',headers=headers,json={'action':'reserve','request_key':'native_checkout_001','variant_ids':['gid://shopify/ProductVariant/11']})
+        result=client.post(base+'/rewards',headers=headers,json={'action':'reserve','reward_points':500,'request_key':'native_checkout_001','variant_ids':['gid://shopify/ProductVariant/11']})
         assert result.status_code==200,result.text
         assert result.json()['state']=='ready'
         seed(store.engine)
@@ -76,7 +83,7 @@ def test_native_harness_automatically_earns_and_restores_after_partial_then_full
     headers={'Authorization':'Bearer '+token};base='/api/loyalty/pos/customers/'+CUSTOMER
     with TestClient(app) as client:
         assert client.get(base,headers=headers).json()['balance_points']=='500'
-        row=client.post(base+'/rewards',headers=headers,json={'action':'reserve',
+        row=client.post(base+'/rewards',headers=headers,json={'action':'reserve','reward_points':500,
             'request_key':'integrated_checkout_001',
             'variant_ids':[] if custom else ['gid://shopify/ProductVariant/11'],
             **({'custom_sales':True} if custom else {})}).json()

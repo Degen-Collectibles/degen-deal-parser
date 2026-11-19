@@ -133,11 +133,14 @@ def test_reviewed_earning_cannot_be_reversed_by_reward_worker(store):
     assert rewards.get(SHOP,row.id).restore_ledger_id is None
 
 
-def test_unapproved_configured_reward_terms_rejected():
-    from test_loyalty_pos import configuration
+def test_only_approved_reward_terms_can_be_chosen():
     from app.loyalty.reward_policy import Reward
-    with pytest.raises(ValueError,match='reward_terms_not_approved'):
-        Reward.from_settings(configuration(loyalty_reward_points=50))
+    assert [(r.points,r.discount_cents,r.minimum_cents) for r in Reward.approved()]==[
+        (250,500,2500),(500,1000,5000),(1000,2500,12500)]
+    assert Reward.for_points(1000).discount_cents==2500
+    for unapproved in (50,0,-250,750,'500',500.0,True,None):
+        with pytest.raises(ValueError,match='reward_terms_not_approved'):
+            Reward.for_points(unapproved)
 
 
 def test_debited_evidence_review_stays_visible_without_second_hold(store):

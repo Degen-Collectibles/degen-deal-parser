@@ -55,7 +55,7 @@ def test_sale_and_full_return_post_once_and_rebuild_matches(store):
     assert store.rebuild_check(SHOP)==[]
 
 @pytest.mark.parametrize('changes',[{'customer_id':'gid://shopify/Customer/9'},
-    {'discount_cents':2000},{'eligible_cents':9999},{'stacked':True},{'paid':False},{'currency':'CAD'}])
+    {'discount_cents':2000},{'eligible_cents':4999},{'stacked':True},{'paid':False},{'currency':'CAD'}])
 def test_invalid_order_never_spends_points(store,changes):
     rewards=funded(store);row=reserve(rewards)
     with pytest.raises(RedemptionError):rewards.settle(SHOP,row.id,evidence(row,**changes),now=SALE)
@@ -130,7 +130,7 @@ def test_config_and_discount_contract(store):
     row=reserve(funded(store));row.eligibility_json='{"requested":["gid://shopify/ProductVariant/11"],"eligible":["gid://shopify/ProductVariant/11"]}';data=discount_input(row)
     assert data['usageLimit']==1 and not any(data['combinesWith'].values())
     assert data['context']=={'customers':{'add':[CUSTOMER]}}
-    assert data['minimumRequirement']['subtotal']['greaterThanOrEqualToSubtotal']=='100.00'
+    assert data['minimumRequirement']['subtotal']['greaterThanOrEqualToSubtotal']=='50.00'
     assert data['customerGets']['value']['discountAmount']['amount']=='10.00'
     assert data['customerGets']['items']=={'products':{'productVariantsToAdd':['gid://shopify/ProductVariant/11']}}
     assert 'appliesOnOneTimePurchase' not in data['customerGets']

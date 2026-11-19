@@ -277,15 +277,28 @@ class Settings(BaseSettings):
     loyalty_redemption_enabled: bool = Field(default=False, alias="LOYALTY_REDEMPTION_ENABLED")
     loyalty_redemption_all_staff_enabled: bool = Field(default=False, alias="LOYALTY_REDEMPTION_ALL_STAFF_ENABLED")
     loyalty_redemption_provider_verified: bool = Field(default=False, alias="LOYALTY_REDEMPTION_PROVIDER_VERIFIED")
-    loyalty_reward_points: int = Field(default=500, ge=1, le=1000000, alias="LOYALTY_REWARD_POINTS")
-    loyalty_reward_discount_cents: int = Field(default=1000, ge=1, le=100000, alias="LOYALTY_REWARD_DISCOUNT_CENTS")
-    loyalty_reward_minimum_cents: int = Field(default=10000, ge=1, le=100000000, alias="LOYALTY_REWARD_MINIMUM_CENTS")
     loyalty_pos_read_enabled: bool = Field(default=False, alias="LOYALTY_POS_READ_ENABLED")
     loyalty_pos_all_staff_enabled: bool = Field(default=False, alias="LOYALTY_POS_ALL_STAFF_ENABLED")
     loyalty_pos_client_id: str = Field(default="", alias="LOYALTY_POS_CLIENT_ID")
     loyalty_pos_client_secret: SecretStr = Field(default="", repr=False, alias="LOYALTY_POS_CLIENT_SECRET")
     loyalty_pos_session_requests: int = Field(default=60, ge=1, le=600, alias="LOYALTY_POS_SESSION_REQUESTS")
     loyalty_pos_total_requests: int = Field(default=600, ge=1, le=12000, alias="LOYALTY_POS_TOTAL_REQUESTS")
+    # Register scan of a customer's rewards card. Off by default; the secret
+    # derives every member code, so changing it invalidates all issued cards.
+    loyalty_member_scan_enabled: bool = Field(default=False, alias="LOYALTY_MEMBER_SCAN_ENABLED")
+    loyalty_member_code_secret: SecretStr = Field(default="", repr=False, alias="LOYALTY_MEMBER_CODE_SECRET")
+    # Rewards-card sign-up from the register: a single-use link shown as a QR
+    # code. The base URL is the public https address customers' phones open.
+    loyalty_wallet_enrollment_enabled: bool = Field(default=False, alias="LOYALTY_WALLET_ENROLLMENT_ENABLED")
+    loyalty_card_base_url: str = Field(default="", alias="LOYALTY_CARD_BASE_URL")
+    # Apple Wallet card. Paths point at PEM files kept outside the repo: the
+    # Pass Type ID certificate, its private key, and Apple's WWDR intermediate.
+    loyalty_apple_team_id: str = Field(default="", alias="LOYALTY_APPLE_TEAM_ID")
+    loyalty_apple_pass_type_id: str = Field(default="", alias="LOYALTY_APPLE_PASS_TYPE_ID")
+    loyalty_apple_pass_cert_path: str = Field(default="", alias="LOYALTY_APPLE_PASS_CERT_PATH")
+    loyalty_apple_pass_key_path: str = Field(default="", alias="LOYALTY_APPLE_PASS_KEY_PATH")
+    loyalty_apple_pass_key_password: SecretStr = Field(default="", repr=False, alias="LOYALTY_APPLE_PASS_KEY_PASSWORD")
+    loyalty_apple_wwdr_cert_path: str = Field(default="", alias="LOYALTY_APPLE_WWDR_CERT_PATH")
 
     # Internal POS loyalty: separate intake, evaluation and ledger kill switches.
     loyalty_receiving_enabled: bool = Field(default=False, alias="LOYALTY_RECEIVING_ENABLED")
