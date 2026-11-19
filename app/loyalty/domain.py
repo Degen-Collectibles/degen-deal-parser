@@ -146,7 +146,9 @@ def _calculate(o, policy, attachment):
     if min(paid_times) < policy.launch_at:
         return Entitlement('excluded', 'prelaunch')
     paid_at = max(paid_times)
-    if paid_at < created or updated < paid_at:
+    # POS can record a successful tender one second before Shopify creates the order.
+    same_pos_second = paid_at == processed and created - paid_at <= timedelta(seconds=1)
+    if (paid_at < created and not same_pos_second) or updated < paid_at:
         raise Review('timestamp_conflict')
     if o['customer_id'] is None:
         return Entitlement('pending', 'customer_unattached')

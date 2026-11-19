@@ -47,20 +47,38 @@ export function canRedeem(api:ContextApi, minimum:number, eligible?:string[]) {
   return Math.round(Number(cart.subtotal)*100)-excludedCents>=minimum;
 }
 type Cart = NonNullable<ContextApi['cart']>['current']['value'];
-const cartBasis=(cart:Cart)=>JSON.stringify({customer:cart.customer,subtotal:cart.subtotal,
+const cartBasis=(cart:Cart)=>JSON.stringify({customer:cart.customer,
   lines:cart.lineItems.map(({discounts,discountAllocations,taxLines,...line})=>line)});
-export function appliedReward(api:ContextApi, code:string, cents:number, basis:string, eligible?:string[]) {
+export function appliedReward(api:ContextApi, code:string, cents:number, basis:string, eligible?:string[], originalSubtotal?:string) {
   const cart=api.cart?.current.value;
   if(!cart || cart.editable===false || cart.customer?.id!==api.customer.id || cartBasis(cart)!==basis)return false;
+  if(originalSubtotal!==undefined) {
+    const before=Math.round(Number(originalSubtotal)*100), after=Math.round(Number(cart.subtotal)*100);
+    if(!/^\d+(\.\d{1,2})?$/.test(cart.subtotal) || (after!==before && after!==before-cents))return false;
+  }
   const discounts=cart.cartDiscounts.length?cart.cartDiscounts:(cart.cartDiscount?[cart.cartDiscount]:[]);
-  const matches=(d:typeof discounts[number])=>d.discountDescription===code &&
-    d.type!=='Percentage' && Number.isFinite(d.amount) && Math.round(d.amount*100)===cents &&
-    (!d.currency || d.currency==='USD');
-  if(discounts.length!==1 || !matches(discounts[0]) || (cart.cartDiscount && !matches(cart.cartDiscount)))return false;
-  if(cart.lineItems.some(line=>line.discounts.length || ((line.isGiftCard || (line.variantId!=null && eligible && !eligible.includes(`gid://shopify/ProductVariant/${line.variantId}`))) && line.discountAllocations?.length)))return false;
-  const allocations=cart.lineItems.flatMap(line=>line.discountAllocations??[]);
-  if(allocations.length && (allocations.some(a=>a.allocatedAmount.currencyCode!=='USD') ||
-    allocations.reduce((n,a)=>n+Math.round(Number(a.allocatedAmount.amount)*100),0)!==cents))return false;
+  const validDiscount=(discount:typeof discounts[number])=>
+    discount.discountDescription===code && discount.type!=='Percentage' &&
+    Number.isFinite(discount.amount) && discount.amount>0 && (!discount.currency || discount.currency==='USD');
+  if(discounts.length>1 || discounts.some(d=>!validDiscount(d) || Math.round(d.amount*100)!==cents) ||
+     (cart.cartDiscount && (!validDiscount(cart.cartDiscount) || Math.round(cart.cartDiscount.amount*100)!==cents)))return false;
+  let lineDiscountCents=0, allocatedCents=0, hasAllocations=false;
+  for(const line of cart.lineItems) {
+    const allocations=line.discountAllocations??[];
+    if(!line.discounts.length && !allocations.length)continue;
+    if(line.isGiftCard || (line.variantId!=null && eligible && !eligible.includes(`gid://shopify/ProductVariant/${line.variantId}`)))return false;
+    if(line.discounts.length>1 || line.discounts.some(d=>!validDiscount(d)))return false;
+    for(const d of line.discounts)lineDiscountCents+=Math.round(d.amount*100);
+    for(const allocation of allocations) {
+      const money=allocation.allocatedAmount;
+      if(money.currencyCode!=='USD' || !/^\d+(\.\d{1,2})?$/.test(String(money.amount)))return false;
+      allocatedCents+=Math.round(Number(money.amount)*100);
+      hasAllocations=true;
+    }
+  }
+  if(hasAllocations && allocatedCents!==cents)return false;
+  if(lineDiscountCents && lineDiscountCents!==cents)return false;
+  if(!discounts.length && lineDiscountCents!==cents)return false;
   return true;
 }
 
@@ -147,6 +165,7 @@ export function RewardView({api}:{api:ContextApi}) {
     try {
       // Everything that can throw stays inside try so the button never sticks disabled.
       const cartBefore=JSON.stringify(api.cart!.current.value);
+      const originalSubtotal=api.cart!.current.value.subtotal;
       const basis=cartBasis(api.cart!.current.value);
       requestKey.current??=newRequestKey();
       const variantIds=cartVariantIds(api);
@@ -188,11 +207,11 @@ export function RewardView({api}:{api:ContextApi}) {
           nativeTimer=setTimeout(()=>reject(Error('Discount application timed out. Do not complete checkout. Check the cart and redemption; points remain reserved.')),3000);
         })]);
       } finally {clearTimeout(nativeTimer!);}
-      while(current() && !appliedReward(api,row.code,reward.discount_cents,basis,row.eligible_variant_ids) && Date.now()<deadline) {
+      while(current() && !appliedReward(api,row.code,reward.discount_cents,basis,row.eligible_variant_ids,originalSubtotal) && Date.now()<deadline) {
         if(cartBasis(api.cart!.current.value)!==basis)break;
         await new Promise(resolve=>setTimeout(resolve,100));
       }
-      if(!current() || !appliedReward(api,row.code,reward.discount_cents,basis,row.eligible_variant_ids))
+      if(!current() || !appliedReward(api,row.code,reward.discount_cents,basis,row.eligible_variant_ids,originalSubtotal))
         throw Error('Discount could not be verified. Do not complete checkout. Check the customer, cart and discount; points remain reserved.');
       if(current())setMessage('Reward applied. Complete this sale in POS. Points remain reserved until the completed order is verified.');
     } catch(error) {
@@ -224,10 +243,18 @@ export function RewardView({api}:{api:ContextApi}) {
         // Take the dead discount off the cart when it is still the one we applied.
         const cart=api.cart?.current.value;
         const applied=cart?(cart.cartDiscounts.length?cart.cartDiscounts:(cart.cartDiscount?[cart.cartDiscount]:[])):[];
-        let cleared=!applied.length;
-        if(!cleared && reservation.code && applied.length===1 && applied[0].discountDescription===reservation.code &&
+        const lineDiscounts=cart?.lineItems.flatMap(line=>line.discounts)??[];
+        const hasLineAllocations=cart?.lineItems.some(line=>line.discountAllocations?.length);
+        let cleared=!applied.length && !lineDiscounts.length && !hasLineAllocations;
+        if(!cleared && reservation.code && (applied.length || lineDiscounts.length) &&
+          [...applied,...lineDiscounts].every(d=>d.discountDescription===reservation.code) &&
           typeof api.cart?.removeCartDiscount==='function') {
-          try {await api.cart.removeCartDiscount();cleared=true;} catch {cleared=false;}
+          try {
+            await api.cart.removeCartDiscount();
+            const updated=api.cart.current.value;
+            cleared=!updated.cartDiscount && !updated.cartDiscounts.length &&
+              updated.lineItems.every(line=>!line.discounts.length && !line.discountAllocations?.length);
+          } catch {cleared=false;}
         }
         if(!current())return;
         if(reservation.state!=='cancelled')shift(1,-1,chosen?.points ?? row.points ?? 0);

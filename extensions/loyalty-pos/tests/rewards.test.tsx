@@ -70,6 +70,25 @@ test('reserves before applying single-use code and never sends price or points',
   expect(await screen.findByText(/Reward applied/)).toBeTruthy();
   expect(screen.getByText('0 available · 500 reserved')).toBeTruthy();
 });
+test('catalog reward verifies the exact net subtotal and eligible line allocation',async()=>{
+  const api=fixture(), cart=api.cart!.current.value, line=cart.lineItems[0];
+  const code='DEGEN-'+'A'.repeat(32);
+  line.price=25;line.quantity=5;cart.subtotal='125.00';
+  const {discounts,discountAllocations,taxLines,...merchandise}=line;
+  const basis=JSON.stringify({customer:cart.customer,lines:[merchandise]});
+  const verify=()=>appliedReward(api,code,2500,basis,['gid://shopify/ProductVariant/11'],'125.00');
+  cart.subtotal='100.00';
+  line.discounts=[{amount:25,discountDescription:code}];
+  line.discountAllocations=[{allocatedAmount:{amount:'25.00',currencyCode:'USD'}}];
+  expect(verify()).toBe(true);
+  cart.subtotal='99.99';expect(verify()).toBe(false);
+  cart.subtotal='100.00';line.discountAllocations[0].allocatedAmount.amount='24.99';
+  expect(verify()).toBe(false);
+  line.discountAllocations[0].allocatedAmount.amount='25.00';
+  line.discounts[0].discountDescription='OTHER';expect(verify()).toBe(false);
+  line.discounts[0].discountDescription=code;
+  expect(appliedReward(api,code,2500,basis,[],'125.00')).toBe(false);
+});
 test('a confirmed cancel frees the points, clears the cart discount and allows a new redeem',async()=>{
   const api=fixture();
   const remove=vi.fn(async()=>{api.cart!.current.value.cartDiscounts=[];});

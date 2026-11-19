@@ -1,7 +1,7 @@
 import {useEffect, useRef, useState} from 'preact/hooks';
 import type {Api} from '@shopify/ui-extensions/pos.home.modal.render';
 
-export type ScanApi = Pick<Api, 'scanner' | 'session' | 'connectivity'> & {cart: Pick<Api['cart'], 'setCustomer'>};
+export type ScanApi = Pick<Api, 'scanner' | 'session' | 'connectivity'> & {cart: Pick<Api['cart'], 'setCustomer' | 'current'>};
 type State = {kind:'ready'} | {kind:'looking'} | {kind:'attached'} | {kind:'error';message:string};
 
 // Must match the server's member code format. Anything else (a product
@@ -27,6 +27,7 @@ export function MemberScan({api}:{api:ScanApi}) {
   const [sources,setSources]=useState(()=>api.scanner.sources.current.value ?? []);
   const busy=useRef(false);
   const mounted=useRef(true);
+  const retryCamera=useRef(false);
   const hasCamera=sources.includes('camera');
   const hasHardware=sources.includes('external') || sources.includes('embedded');
 
@@ -35,7 +36,9 @@ export function MemberScan({api}:{api:ScanApi}) {
     mounted.current=true;
     const opened=Date.now();
     const stale=api.scanner.scannerData.current.value;
+    let active=true;
     async function handle(code:string) {
+      const originalCustomer=api.cart.current.value.customer?.id;
       if (busy.current) return;
       // The camera view covers this screen, so close it on every scan: the
       // cashier must see the result, including a rejected code.
@@ -55,21 +58,32 @@ export function MemberScan({api}:{api:ScanApi}) {
         if (!response.ok) throw Error(messages[response.status] ?? unavailable);
         const id=(await response.json() as {customer_id?:unknown}).customer_id;
         if (typeof id!=='string' || !CUSTOMER.test(id) || !Number.isSafeInteger(Number(id))) throw Error(unavailable);
-        try {await api.cart.setCustomer({id:Number(id)});}
+        if (!active || controller.signal.aborted || api.cart.current.value.customer?.id!==originalCustomer) throw Error(attachFailed);
+        if (Number(id)===originalCustomer) {
+          setState({kind:'error',message:'This customer is already on the cart. Scan the other card to switch customers.'});
+          return;
+        }
+        try {
+          await api.cart.setCustomer({id:Number(id)});
+          for (let attempt=0; active && api.cart.current.value.customer?.id!==Number(id) && attempt<30; attempt++) {
+            await new Promise(resolve=>setTimeout(resolve,100));
+          }
+          if (api.cart.current.value.customer?.id!==Number(id)) throw Error(attachFailed);
+        }
         catch {throw Error(attachFailed);}
         next={kind:'attached'};
       } catch (error) {
         const message=error instanceof Error?error.message:'';
         next={kind:'error',message:known.includes(message)?message:unavailable};
       } finally {clearTimeout(timeout);busy.current=false;}
-      if (mounted.current) setState(next);
+      if (active && mounted.current) setState(next);
     }
     const unsubscribe=api.scanner.scannerData.current.subscribe(result=>{
-      if (result===stale || Date.now()-opened<REPLAY_MS) return;
+      if (result===stale || (!retryCamera.current && stale?.data && result?.data===stale.data) || Date.now()-opened<REPLAY_MS) return;
       const data=result?.data;
-      if (typeof data==='string' && data.trim()) void handle(data.trim());
+      if (typeof data==='string' && data.trim()) {retryCamera.current=false;void handle(data.trim());}
     });
-    return ()=>{mounted.current=false;unsubscribe();api.scanner.hideCameraScanner();};
+    return ()=>{active=false;mounted.current=false;unsubscribe();api.scanner.hideCameraScanner();};
   },[api]);
   // A register with no hardware scanner goes straight to the camera.
   useEffect(()=>{
@@ -87,7 +101,7 @@ export function MemberScan({api}:{api:ScanApi}) {
         <s-text>{hasHardware?'Scan the code on the customer’s rewards card.':
           hasCamera?'Point the camera at the code on the customer’s rewards card.':
           'No scanner is available on this register. Look the customer up by name.'}</s-text>
-        {hasCamera && <s-button variant="secondary" onClick={()=>api.scanner.showCameraScanner()}>Use camera</s-button>}
+        {hasCamera && <s-button variant="secondary" onClick={()=>{retryCamera.current=true;api.scanner.showCameraScanner();}}>Use camera</s-button>}
       </>}
     </s-stack></s-box></s-scroll-box>
   </s-page>;

@@ -1,4 +1,4 @@
-import {render,screen,waitFor,cleanup} from '@testing-library/preact';
+import {render,screen,waitFor,cleanup,fireEvent} from '@testing-library/preact';
 import {afterEach,beforeEach,expect,test,vi} from 'vitest';
 import {MemberScan,REPLAY_MS,type ScanApi} from '../src/MemberScan';
 
@@ -7,12 +7,13 @@ type Scan={data?:string;source?:string};
 function fixture(sources:string[]=['external'],previous:Scan={}) {
   const listeners=new Set<(value:Scan)=>void>();
   const data={value:previous,subscribe(fn:(value:Scan)=>void){listeners.add(fn);return ()=>listeners.delete(fn);}};
+  const cartState={customer:undefined as {id:number}|undefined};
   const api={
     scanner:{scannerData:{current:data},sources:{current:{value:sources,subscribe:()=>()=>{}}},
       showCameraScanner:vi.fn(),hideCameraScanner:vi.fn()},
     session:{getSessionToken:vi.fn(async()=>'test-token')},
     connectivity:{current:{value:{internetConnected:'Connected'},subscribe:()=>()=>{}}},
-    cart:{setCustomer:vi.fn(async(_customer:{id:number})=>{})},
+    cart:{current:{value:cartState},setCustomer:vi.fn(async(customer:{id:number})=>{cartState.customer=customer;})},
   };
   const scan=(value:string)=>{data.value={data:value,source:'external'};listeners.forEach(fn=>fn(data.value));};
   const replay=()=>listeners.forEach(fn=>fn(data.value));
@@ -50,6 +51,7 @@ test('the scan that was already on screen at open is ignored even later',async()
   const f=fixture(['external'],{data:CODE,source:'external'});const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
   render(<MemberScan api={f.api}/>);open();
   f.replay();
+  f.scan(CODE); // Same cached payload in a fresh native object.
   await new Promise(r=>setTimeout(r,0));
   expect(fetcher).not.toHaveBeenCalled();
 });
@@ -91,6 +93,26 @@ test('a second scan during a lookup is ignored',async()=>{
   await waitFor(()=>expect(f.raw.cart.setCustomer).toHaveBeenCalledTimes(1));
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
+test('a cashier can explicitly reopen the camera to rescan its previous card',async()=>{
+  const f=fixture(['camera'],{data:CODE,source:'camera'});
+  vi.stubGlobal('fetch',vi.fn(async()=>reply({customer_id:'101'})));
+  render(<MemberScan api={f.api}/>);open();
+  fireEvent.click(screen.getByText('Use camera'));
+  f.scan(CODE);
+  expect(await screen.findByText('Customer added to the cart.')).toBeTruthy();
+});
+
+test('a slow lookup cannot overwrite a customer selected in the meantime',async()=>{
+  const f=fixture();f.raw.cart.current.value.customer={id:100};
+  let finish!:(value:Response)=>void;
+  const fetcher=vi.fn(()=>new Promise<Response>(r=>{finish=r;}));vi.stubGlobal('fetch',fetcher);
+  render(<MemberScan api={f.api}/>);open();f.scan(CODE);
+  await waitFor(()=>expect(fetcher).toHaveBeenCalledOnce());
+  f.raw.cart.current.value.customer={id:102};
+  finish(reply({customer_id:'101'}));
+  expect(await screen.findByText(/could not attach this customer/)).toBeTruthy();
+  expect(f.raw.cart.setCustomer).not.toHaveBeenCalled();
+});
 test('offline registers do not look anything up',async()=>{
   const f=fixture();f.raw.connectivity.current.value.internetConnected='Disconnected';
   const fetcher=vi.fn();vi.stubGlobal('fetch',fetcher);
@@ -112,4 +134,16 @@ test('camera opens by itself only when there is no hardware scanner, and closes 
   expect(camera.listeners.size).toBe(0);
   render(<MemberScan api={fixture([]).api}/>);
   expect(screen.getByText(/No scanner is available/)).toBeTruthy();
+});
+
+test('switching requires the cart to report the scanned customer',async()=>{
+  const f=fixture(); f.raw.cart.current.value.customer={id:100};
+  vi.stubGlobal('fetch',vi.fn(async()=>reply({customer_id:'101'})));
+  f.raw.cart.setCustomer.mockResolvedValueOnce(undefined);
+  render(<MemberScan api={f.api}/>);open();f.scan(CODE);
+  expect(await screen.findByText(/could not attach this customer/,{}, {timeout:4500})).toBeTruthy();
+  expect(screen.queryByText('Customer added to the cart.')).toBeNull();
+  f.scan(CODE);
+  expect(await screen.findByText('Customer added to the cart.')).toBeTruthy();
+  expect(f.raw.cart.current.value.customer.id).toBe(101);
 });
